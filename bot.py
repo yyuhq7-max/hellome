@@ -532,7 +532,6 @@ async def on_message(message: discord.Message):
     couleur="Couleur de l'embed (options : bleu, vert, rouge, violet, or, gris)"
 )
 @app_commands.choices(couleur=COLOR_CHOICES)
-@app_commands.default_permissions(administrator=True)
 async def setuprules(
     interaction: discord.Interaction,
     titre: str = "MVP Terms of Service / Server Rules",
@@ -755,9 +754,34 @@ async def clear(interaction: discord.Interaction, nombre: int):
     await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés avec succès.")
 
 
+# --- Serveur HTTP minimal pour garder le bot actif sur Render (Web Service) ---
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot Discord actif !")
+
+    def log_message(self, format, *args):
+        # Empeche de spammer les logs Render à chaque ping
+        pass
+
+def run_keep_alive_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+    print(f"🌐 Serveur keep-alive lancé sur le port {port}")
+    server.serve_forever()
+
+def start_keep_alive():
+    thread = threading.Thread(target=run_keep_alive_server, daemon=True)
+    thread.start()
+
+
 # --- Démarrage du bot ---
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         raise RuntimeError("La variable d'environnement DISCORD_TOKEN n'est pas définie.")
+
+    start_keep_alive()  # Lance le petit serveur HTTP en parallèle pour rester actif sur Render
     bot.run(TOKEN)
