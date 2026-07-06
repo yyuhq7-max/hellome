@@ -859,6 +859,119 @@ async def embed_command(
     await interaction.channel.send(embed=custom_embed)
 
 
+# --- Vue de confirmation avant l'envoi massif de messages privés ---
+class GlobalAnnounceConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Seule la personne ayant lancé cette annonce peut la confirmer.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Confirmer et envoyer", style=discord.ButtonStyle.danger, custom_id="global_announce_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="📨 Envoi en cours, veuillez patienter...", view=self)
+        self.stop()
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="global_announce_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = False
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Annonce globale annulée.", embed=None, view=self)
+        self.stop()
+
+
+@bot.tree.command(name="globalannounce", description="Envoie un embed en message privé à tous les membres du serveur.")
+@app_commands.describe(
+    titre="Titre de l'annonce",
+    description="Contenu de l'annonce",
+    couleur="Couleur de l'embed",
+    image_url="URL d'une image à afficher (facultatif)",
+    inclure_bots="Envoyer également aux comptes bots (non, par défaut)"
+)
+@app_commands.choices(couleur=COLOR_CHOICES)
+@app_commands.default_permissions(administrator=True)
+async def globalannounce(
+    interaction: discord.Interaction,
+    titre: str,
+    description: str,
+    couleur: str = "bleu",
+    image_url: str = None,
+    inclure_bots: bool = False
+):
+    embed = discord.Embed(
+        title=titre,
+        description=description,
+        color=COLOR_MAP.get(couleur, discord.Color.blue())
+    )
+    embed.set_footer(
+        text=f"Annonce de {interaction.guild.name}",
+        icon_url=interaction.guild.icon.url if interaction.guild.icon else None
+    )
+    embed.timestamp = datetime.datetime.now()
+    if image_url:
+        embed.set_image(url=image_url)
+
+    members = [m for m in interaction.guild.members if inclure_bots or not m.bot]
+    count = len(members)
+
+    if count == 0:
+        await interaction.response.send_message("❌ Aucun membre à qui envoyer cette annonce.", ephemeral=True)
+        return
+
+    estimated_seconds = count  # ~1 message/seconde pour rester sous les limites de Discord
+    estimated_minutes = max(1, round(estimated_seconds / 60))
+
+    confirm_embed = discord.Embed(
+        title="⚠️ Confirmation requise",
+        description=(
+            f"Vous êtes sur le point d'envoyer cette annonce **en message privé** à **{count}** membre(s) "
+            f"de **{interaction.guild.name}**.\n\n"
+            f"⏱️ Durée estimée : environ **{estimated_minutes}** minute(s).\n\n"
+            "Aperçu de l'embed qui sera envoyé ci-dessous :"
+        ),
+        color=discord.Color.orange()
+    )
+
+    view = GlobalAnnounceConfirmView(interaction.user.id)
+    await interaction.response.send_message(embeds=[confirm_embed, embed], view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    sent = 0
+    failed = 0
+    for member in members:
+        try:
+            await member.send(embed=embed)
+            sent += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+        # Petite pause pour éviter de se faire rate-limit par Discord sur les DMs en masse
+        await asyncio.sleep(1)
+
+    result_embed = discord.Embed(
+        title="📨 Annonce globale terminée",
+        description=(
+            f"✅ Envoyée avec succès à **{sent}** membre(s).\n"
+            f"❌ Échec pour **{failed}** membre(s) (messages privés fermés ou erreur)."
+        ),
+        color=discord.Color.green() if failed == 0 else discord.Color.gold()
+    )
+    await interaction.followup.send(embed=result_embed, ephemeral=True)
+
+
 # --- Commandes de Modération ---
 @bot.tree.command(name="ban", description="Bannir définitivement un membre du serveur.")
 @app_commands.describe(membre="Le membre à bannir", raison="La raison du bannissement")
