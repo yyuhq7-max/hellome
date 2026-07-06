@@ -4,7 +4,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Resell server rules in French, English, Spanish, and German for MVP
+# Règles de revente du serveur MVP en français, anglais, espagnol et allemand
 RULES = {
     "fr": (
         "📜 **RÈGLES DE REVENTE MVP (RESELL)** 📜\n\n"
@@ -26,7 +26,7 @@ RULES = {
         "📜 **REGLAS DE REVENTA MVP** 📜\n\n"
         "1. **Respeto y Civilidad**: Sé cortés y respetuoso con todos. No se tolerarán insultos, amenazas ni comportamientos tóxicos.\n"
         "2. **Tratos Legítimos**: Las estafas (scams), la venta de réplicas no declaradas y el comercio de artículos robados están prohibidos y resultarán en un baneo permanente.\n"
-        "3. **Formato de Anuncios**: Debes usar los canales correctos (`#wts` para vender, `#wtb` para comprar, `#wtt` para intercambiar) y seguir la plantilla establecida.\n"
+        "3. **Formato de Anuncios**: Debes usar los canales correctos (`#wts` para vender, `#wtb` para comprar, `#wtt` para intercambiar) et seguir la plantilla establecida.\n"
         "4. **No Interferir (Sniping)**: Está prohibido contactar en privado a un miembro que ya esté negociando públicamente con otro vendedor/comprador.\n"
         "5. **Descargo de Responsabilidad**: El equipo de moderación no se hace responsable de ningún inconveniente en las transacciones. Usa un intermediario (Middleman) de confianza si es necesario."
     ),
@@ -42,19 +42,18 @@ RULES = {
 
 class LanguageSelect(discord.ui.Select):
     def __init__(self):
-        # Dropdown options with flags for each language/country
         options = [
-            discord.SelectOption(
-                label="English", 
-                description="Read the MVP resell server rules in English", 
-                emoji="🇬🇧", 
-                value="en"
-            ),
             discord.SelectOption(
                 label="Français", 
                 description="Lire les règles du serveur de revente MVP en Français", 
                 emoji="🇫🇷", 
                 value="fr"
+            ),
+            discord.SelectOption(
+                label="English", 
+                description="Read the MVP resell server rules in English", 
+                emoji="🇬🇧", 
+                value="en"
             ),
             discord.SelectOption(
                 label="Español", 
@@ -69,9 +68,8 @@ class LanguageSelect(discord.ui.Select):
                 value="de"
             )
         ]
-        # Persistent custom ID
         super().__init__(
-            placeholder="Choose a language / Choisissez une langue...", 
+            placeholder="Choisissez une langue / Choose a language...", 
             min_values=1, 
             max_values=1, 
             options=options, 
@@ -79,16 +77,12 @@ class LanguageSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # Retrieve selected language key
         selected_lang = self.values[0]
-        rules_text = RULES.get(selected_lang, "Rules not found.")
-        
-        # ephemeral=True makes the rules visible ONLY to the user who clicked
+        rules_text = RULES.get(selected_lang, "Règles introuvables.")
         await interaction.response.send_message(rules_text, ephemeral=True)
 
 class RulesView(discord.ui.View):
     def __init__(self):
-        # timeout=None allows the view to stay active forever
         super().__init__(timeout=None)
         self.add_item(LanguageSelect())
 
@@ -99,29 +93,27 @@ class RulesBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Re-register the persistent view upon bot start
         self.add_view(RulesView())
 
 bot = RulesBot()
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot successfully connected as {bot.user.name}")
-    print("Ready to display resell rules via the dropdown menu!")
+    print(f"✅ Bot connecté avec succès en tant que {bot.user.name}")
+    print("Prêt à afficher les règles de revente via le menu déroulant !")
 
 @bot.command(name="setup_rules")
 @commands.has_permissions(administrator=True)
 async def setup_rules(ctx: commands.Context):
-    """Administrator command to send the language selection embed"""
+    """Commande administrateur pour envoyer l'embed de sélection de la langue"""
     embed = discord.Embed(
-        title="MVP Terms of Service / Server Rules",
-        description="Please select your preferred language below to read the MVP server rules.\n\n"
-                    "Veuillez sélectionner votre langue ci-dessous pour lire les règles du serveur MVP.",
+        title="Conditions d'utilisation / Règles du serveur MVP",
+        description="Veuillez sélectionner votre langue ci-dessous pour lire les règles du serveur MVP.\n\n"
+                    "Please select your preferred language below to read the MVP server rules.",
         color=discord.Color.blue()
     )
-    # Send the embed message with the select menu view
     await ctx.send(embed=embed, view=RulesView())
-    await ctx.message.delete() # Cleans up the chat by deleting the !setup_rules command trigger
+    await ctx.message.delete()
 
 class SimpleWebServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -131,18 +123,18 @@ class SimpleWebServer(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is alive!")
 
 def run_web_server():
-    # Hosting platforms (like Render) specify a PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), SimpleWebServer)
-    print(f"ℹ️ Web server started on port {port} for hosting keep-alive.")
+    print(f"ℹ️ Serveur web démarré sur le port {port} pour le maintien en ligne.")
     server.serve_forever()
 
-# Replace 'YOUR_TOKEN_HERE' with your actual bot token from the Discord Developer Portal
 if __name__ == "__main__":
-    TOKEN = "YOUR_TOKEN_HERE"
-    if TOKEN == "YOUR_TOKEN_HERE":
-        print("❌ Please configure your Discord TOKEN in bot.py before running the bot.")
+    # Récupère le token depuis les variables d'environnement (Render) ou utilise la valeur écrite ci-dessous
+    TOKEN = os.environ.get("DISCORD_TOKEN", "VOTRE_TOKEN_ICI")
+    
+    if TOKEN == "VOTRE_TOKEN_ICI":
+        print("❌ Veuillez configurer le TOKEN de votre bot Discord dans bot.py ou via la variable d'environnement DISCORD_TOKEN.")
     else:
-        # Start a lightweight web server in a background thread for hosting platforms (Render, Koyeb, etc.)
+        # Lancement du serveur web en arrière-plan pour les hébergeurs (Render, Koyeb, etc.)
         threading.Thread(target=run_web_server, daemon=True).start()
         bot.run(TOKEN)
