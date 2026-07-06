@@ -32,7 +32,10 @@ COLOR_MAP = {
     "rouge": discord.Color.red(),
     "violet": discord.Color.purple(),
     "or": discord.Color.gold(),
-    "gris": discord.Color.light_grey()
+    "gris": discord.Color.light_grey(),
+    "blurple": discord.Color.blurple(),
+    "noir": discord.Color.dark_theme() if hasattr(discord.Color, "dark_theme") else discord.Color.default(),
+    "blanc": discord.Color.from_rgb(255, 255, 255),
 }
 
 COLOR_CHOICES = [
@@ -43,6 +46,38 @@ COLOR_CHOICES = [
     app_commands.Choice(name="Or", value="or"),
     app_commands.Choice(name="Gris", value="gris")
 ]
+
+
+def parse_color(value: str) -> discord.Color:
+    """Convertit une saisie utilisateur (nom de couleur ou code hexadécimal) en discord.Color.
+    Retourne discord.Color.blurple() par défaut si la valeur est vide ou invalide."""
+    if not value:
+        return discord.Color.blurple()
+
+    value = value.strip().lower()
+
+    # Nom de couleur connu (bleu, vert, rouge, etc.)
+    if value in COLOR_MAP:
+        return COLOR_MAP[value]
+
+    # Code hexadécimal (#RRGGBB ou RRGGBB)
+    hex_value = value.lstrip("#")
+    if len(hex_value) == 6:
+        try:
+            return discord.Color(int(hex_value, 16))
+        except ValueError:
+            pass
+
+    # Valeur non reconnue -> couleur par défaut
+    return discord.Color.blurple()
+
+
+def parse_emoji(value: str):
+    """Retourne l'emoji saisi par l'utilisateur, ou None si le champ est vide/invalide."""
+    if value and value.strip():
+        return value.strip()
+    return None
+
 
 # Conditions Générales d'Utilisation (CGU) / Terms of Service (TOS) du serveur MVP
 RULES = {
@@ -238,82 +273,32 @@ class AutoroleView(discord.ui.View):
         self.add_item(RoleSelect())
 
 
-# --- Modal et Composants pour la réponse automatique dans un salon ---
-class AutoresponderModal(discord.ui.Modal):
-    def __init__(self, channel_id: int):
-        super().__init__(title="Message de Réponse Automatique")
-        self.channel_id = channel_id
-
-        # Champ de saisie pour le message facultatif à renvoyer automatiquement
-        self.response_text = discord.ui.TextInput(
-            label="Message textuel facultatif (laisser vide pour l'image seule) :",
-            style=discord.TextStyle.paragraph,
-            placeholder="Ex : Merci pour votre vouch ! La team MVP vous remercie.",
-            required=False,
-            max_length=1500
-        )
-        self.add_item(self.response_text)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        config = load_config()
-        guild_id = str(interaction.guild.id)
-        if guild_id not in config:
-            config[guild_id] = {}
-        
-        config[guild_id]["autoresponder_channel"] = self.channel_id
-        config[guild_id]["autoresponder_message"] = self.response_text.value
-        save_config(config)
-
-        channel = interaction.guild.get_channel(self.channel_id)
-        channel_mention = channel.mention if channel else f"Salon ID: {self.channel_id}"
-
-        msg_val = self.response_text.value if self.response_text.value else "(Seulement l'image)"
-        await interaction.response.send_message(
-            f"✅ **Répondeur automatique activé** avec l'image `vouch.png` !\n"
-            f"• **Salon ciblé :** {channel_mention}\n"
-            f"• **Texte configuré :** {msg_val}",
-            ephemeral=True
-        )
-
-class ChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self):
-        super().__init__(
-            placeholder="Sélectionnez le salon textuel ciblé...",
-            min_values=1,
-            max_values=1,
-            channel_types=[discord.ChannelType.text],
-            custom_id="persistent_autoresponder_channel_select"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
-        # Ouvrir la boîte modale de saisie de texte à la sélection du salon
-        await interaction.response.send_modal(AutoresponderModal(channel.id))
-
-class AutoresponderChannelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(ChannelSelect())
-
-
-# --- Composants UI pour la configuration du Rôle par Bouton (Self-Role) ---
+# --- Modal et Composants pour la configuration du Rôle par Bouton (Self-Role) ---
+# Cette modale permet une personnalisation complète : titre, description, couleur,
+# texte du bouton et emoji du bouton.
 class SelfRoleModal(discord.ui.Modal):
     def __init__(self, role_id: int):
         super().__init__(title="Configuration du Rôle par Bouton")
         self.role_id = role_id
 
         self.embed_titre = discord.ui.TextInput(
-            label="Titre de l'embed (facultatif)",
+            label="Titre de l'embed",
             placeholder="Ex : Obtenir le rôle Notifications",
             required=False,
             max_length=100
         )
         self.embed_texte = discord.ui.TextInput(
-            label="Texte de l'embed (facultatif)",
+            label="Description de l'embed",
             style=discord.TextStyle.paragraph,
             placeholder="Ex : Cliquez sur le bouton ci-dessous pour obtenir ce rôle.",
             required=False,
             max_length=1000
+        )
+        self.embed_couleur = discord.ui.TextInput(
+            label="Couleur (nom ou hex, ex: bleu / #5865F2)",
+            placeholder="bleu, vert, rouge, violet, or, gris ou #RRGGBB",
+            required=False,
+            max_length=20
         )
         self.bouton_texte = discord.ui.TextInput(
             label="Texte du bouton",
@@ -321,9 +306,17 @@ class SelfRoleModal(discord.ui.Modal):
             required=True,
             max_length=80
         )
+        self.bouton_emoji = discord.ui.TextInput(
+            label="Emoji du bouton (facultatif)",
+            placeholder="Ex : 🎭 ou 🔔",
+            required=False,
+            max_length=50
+        )
         self.add_item(self.embed_titre)
         self.add_item(self.embed_texte)
+        self.add_item(self.embed_couleur)
         self.add_item(self.bouton_texte)
+        self.add_item(self.bouton_emoji)
 
     async def on_submit(self, interaction: discord.Interaction):
         role = interaction.guild.get_role(self.role_id)
@@ -331,13 +324,20 @@ class SelfRoleModal(discord.ui.Modal):
             await interaction.response.send_message("❌ Rôle introuvable.", ephemeral=True)
             return
 
+        embed_color = parse_color(self.embed_couleur.value)
+        button_emoji = parse_emoji(self.bouton_emoji.value)
+
         embed = discord.Embed(
             title=self.embed_titre.value if self.embed_titre.value else f"🎭 Rôle : {role.name}",
             description=self.embed_texte.value if self.embed_texte.value else "Cliquez sur le bouton ci-dessous pour obtenir ou retirer ce rôle.",
-            color=discord.Color.blurple()
+            color=embed_color
         )
 
-        view = SelfRoleView(role.id, self.bouton_texte.value)
+        try:
+            view = SelfRoleView(role.id, self.bouton_texte.value, button_emoji)
+        except Exception:
+            # Si l'emoji fourni est invalide, on retombe sur l'emoji par défaut
+            view = SelfRoleView(role.id, self.bouton_texte.value, None)
 
         # Sauvegarde de la configuration pour pouvoir ré-enregistrer le bouton après un redémarrage
         config = load_config()
@@ -347,20 +347,24 @@ class SelfRoleModal(discord.ui.Modal):
         selfroles = config[guild_id].get("selfroles", [])
         # On évite les doublons pour un même rôle
         selfroles = [entry for entry in selfroles if entry.get("role_id") != role.id]
-        selfroles.append({"role_id": role.id, "label": self.bouton_texte.value})
+        selfroles.append({
+            "role_id": role.id,
+            "label": self.bouton_texte.value,
+            "emoji": button_emoji
+        })
         config[guild_id]["selfroles"] = selfroles
         save_config(config)
 
-        await interaction.response.send_message("✅ Le bouton de rôle automatique a été créé !", ephemeral=True)
+        await interaction.response.send_message("✅ Le bouton de rôle a été créé avec succès !", ephemeral=True)
         await interaction.channel.send(embed=embed, view=view)
 
 
 class SelfRoleButton(discord.ui.Button):
-    def __init__(self, role_id: int, label: str):
+    def __init__(self, role_id: int, label: str, emoji: str = None):
         super().__init__(
             label=label,
             style=discord.ButtonStyle.primary,
-            emoji="🎭",
+            emoji=emoji if emoji else "🎭",
             custom_id=f"selfrole_{role_id}"
         )
         self.role_id = role_id
@@ -384,9 +388,9 @@ class SelfRoleButton(discord.ui.Button):
 
 
 class SelfRoleView(discord.ui.View):
-    def __init__(self, role_id: int, label: str):
+    def __init__(self, role_id: int, label: str, emoji: str = None):
         super().__init__(timeout=None)
-        self.add_item(SelfRoleButton(role_id, label))
+        self.add_item(SelfRoleButton(role_id, label, emoji))
 
 
 class SelfRoleRoleSelect(discord.ui.RoleSelect):
@@ -400,7 +404,7 @@ class SelfRoleRoleSelect(discord.ui.RoleSelect):
 
     async def callback(self, interaction: discord.Interaction):
         role = self.values[0]
-        # Ouvrir la modale pour personnaliser le texte de l'embed et du bouton
+        # Ouvrir la modale pour personnaliser entièrement l'embed et le bouton
         await interaction.response.send_modal(SelfRoleModal(role.id))
 
 
@@ -424,20 +428,17 @@ class SetupDashboardView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, view=AutoroleView(), ephemeral=True)
 
-    @discord.ui.button(label="Répondeur de Salon (Auto-Response)", style=discord.ButtonStyle.success, emoji="💬", custom_id="dashboard_autoresponder")
-    async def configure_autoresponder(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="💬 Configuration du Répondeur automatique",
-            description="Sélectionnez le salon ci-dessous. Dès qu'un message y sera envoyé, le bot supprimera l'ancienne image et enverra la nouvelle image `vouch.png`.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, view=AutoresponderChannelView(), ephemeral=True)
-
     @discord.ui.button(label="Rôle par Bouton (Self-Role)", style=discord.ButtonStyle.secondary, emoji="🎭", custom_id="dashboard_selfrole")
     async def configure_selfrole(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
-            title="🎭 Configuration du Rôle par Bouton",
-            description="Sélectionnez le rôle que les membres pourront obtenir (ou retirer) en cliquant sur un bouton. Vous pourrez ensuite personnaliser le titre, le texte de l'embed et le texte du bouton.",
+            title="🎭 Créer un Rôle par Bouton",
+            description="Sélectionnez le rôle que les membres pourront obtenir (ou retirer) en cliquant sur un bouton.\n\n"
+                        "Vous pourrez ensuite personnaliser entièrement :\n"
+                        "• Le **titre** de l'embed\n"
+                        "• La **description** de l'embed\n"
+                        "• La **couleur** de l'embed\n"
+                        "• Le **texte** du bouton\n"
+                        "• L'**emoji** du bouton",
             color=discord.Color.blurple()
         )
         await interaction.response.send_message(embed=embed, view=SelfRoleConfigView(), ephemeral=True)
@@ -477,15 +478,14 @@ class RulesBot(commands.Bot):
         # Ré-enregistrement des vues persistantes pour éviter de les perdre aux reboots
         self.add_view(RulesView())
         self.add_view(AutoroleView())
-        self.add_view(AutoresponderChannelView())
         self.add_view(SetupDashboardView())
         self.add_view(SelfRoleConfigView())
 
-        # Ré-enregistrement de tous les boutons de rôle automatique déjà configurés
+        # Ré-enregistrement de tous les boutons de rôle déjà configurés
         config = load_config()
         for guild_id, guild_config in config.items():
             for entry in guild_config.get("selfroles", []):
-                self.add_view(SelfRoleView(entry["role_id"], entry["label"]))
+                self.add_view(SelfRoleView(entry["role_id"], entry["label"], entry.get("emoji")))
         
         # Synchronisation globale des commandes slash
         await self.tree.sync()
@@ -519,43 +519,6 @@ async def on_message(message: discord.Message):
     # Ignorer les messages de bots pour éviter les boucles infinies
     if message.author.bot:
         return
-
-    # Vérification du répondeur automatique de salon
-    config = load_config()
-    guild_id = str(message.guild.id) if message.guild else None
-
-    if guild_id and guild_id in config:
-        target_channel_id = config[guild_id].get("autoresponder_channel")
-        response_msg = config[guild_id].get("autoresponder_message")
-
-        # Si le message est dans le salon ciblé
-        if target_channel_id and message.channel.id == target_channel_id:
-            # 1. Tenter de supprimer la dernière image envoyée par le bot
-            last_msg_id = config[guild_id].get("autoresponder_last_msg")
-            if last_msg_id:
-                try:
-                    old_msg = await message.channel.fetch_message(last_msg_id)
-                    await old_msg.delete()
-                except Exception:
-                    pass # Le message a pu être supprimé manuellement ou n'existe plus
-
-            # 2. Envoyer la nouvelle image vouch.png (et le texte si configuré)
-            try:
-                file = None
-                if os.path.exists("vouch.png"):
-                    file = discord.File("vouch.png")
-
-                # Envoi du message
-                new_msg = await message.channel.send(
-                    content=response_msg if response_msg else None,
-                    file=file
-                )
-
-                # 3. Enregistrer l'ID de ce nouveau message
-                config[guild_id]["autoresponder_last_msg"] = new_msg.id
-                save_config(config)
-            except discord.Forbidden:
-                print(f"❌ Répondeur : Droits d'écriture ou d'envoi de fichiers manquants dans #{message.channel.name}.")
 
     # Important : permet aux commandes slash et classiques de fonctionner
     await bot.process_commands(message)
@@ -594,8 +557,7 @@ async def setup(interaction: discord.Interaction):
         title="⚙️ MVP Server - Configuration Dashboard",
         description="Choisissez la configuration que vous souhaitez ajuster ou activer sur votre serveur : \n\n"
                     "👤 **Rôle Automatique (Autorole)** : Attribuer un rôle par défaut aux arrivants.\n"
-                    "💬 **Répondeur de Salon** : Envoyer une image automatique et supprimer la précédente à chaque envoi.\n"
-                    "🎭 **Rôle par Bouton (Self-Role)** : Créer un message avec un bouton permettant aux membres de s'attribuer un rôle.",
+                    "🎭 **Rôle par Bouton (Self-Role)** : Créer un embed avec un bouton entièrement personnalisable (titre, description, couleur, texte et emoji du bouton) permettant aux membres d'obtenir un rôle.",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
@@ -794,9 +756,6 @@ async def clear(interaction: discord.Interaction, nombre: int):
 
 
 # --- Démarrage du bot ---
-# NOTE : le fichier original fourni était tronqué à ce stade (fin de /clear).
-# Complétez ci-dessous avec vos éventuelles commandes additionnelles, puis lancez le bot
-# avec le token stocké dans une variable d'environnement (ne jamais coder le token en dur).
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
