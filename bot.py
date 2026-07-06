@@ -472,8 +472,11 @@ class RulesBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True 
+        intents.members = True
+        intents.invites = True  # Nécessaire pour les événements on_invite_create / on_invite_delete (invite tracker)
         super().__init__(command_prefix="!", intents=intents)
+        # Cache des invitations par serveur : {guild_id: {code: uses}}
+        self.invite_cache = {}
 
     async def setup_hook(self):
         # Ré-enregistrement des vues persistantes pour éviter de les perdre aux reboots
@@ -528,6 +531,16 @@ bot = RulesBot()
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté avec succès en tant que {bot.user.name}")
+
+    # Mise en cache des invitations existantes pour chaque serveur (invite tracker)
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            bot.invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+        except discord.Forbidden:
+            bot.invite_cache[guild.id] = {}
+            print(f"⚠️ Invite tracker : permissions insuffisantes pour lire les invitations sur {guild.name}.")
+
     print("Prêt et synchronisé !")
 
 @bot.event
@@ -545,6 +558,25 @@ async def on_member_join(member: discord.Member):
             except discord.Forbidden:
                 print(f"❌ Autorole : Impossible d'attribuer le rôle {role.name} à {member.name} (permissions insuffisantes).")
 
+    # --- Invite tracker : détection de l'invitation utilisée ---
+    try:
+        await track_invite_on_join(member)
+    except Exception as e:
+        print(f"⚠️ Invite tracker : erreur lors du suivi de l'invitation pour {member.name} : {e}")
+
+@bot.event
+async def on_invite_create(invite: discord.Invite):
+    # Nouvelle invitation créée : on l'ajoute au cache avec 0 utilisation
+    guild_cache = bot.invite_cache.setdefault(invite.guild.id, {})
+    guild_cache[invite.code] = invite.uses
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite):
+    # Invitation supprimée : on la retire du cache pour éviter les erreurs de calcul
+    guild_cache = bot.invite_cache.get(invite.guild.id)
+    if guild_cache and invite.code in guild_cache:
+        del guild_cache[invite.code]
+
 @bot.event
 async def on_message(message: discord.Message):
     # Ignorer les messages de bots pour éviter les boucles infinies
@@ -553,6 +585,102 @@ async def on_message(message: discord.Message):
 
     # Important : permet aux commandes slash et classiques de fonctionner
     await bot.process_commands(message)
+
+
+# ==================== SYSTÈME DE SUIVI DES INVITATIONS (INVITE TRACKER) ====================
+
+def get_invite_data(config: dict, guild_id: str) -> dict:
+    """Retourne (et initialise si besoin) le dictionnaire de suivi des invitations d'un serveur."""
+    if guild_id not in config:
+        config[guild_id] = {}
+    config[guild_id].setdefault("invite_counts", {})   # {user_id: nombre_d_invitations}
+    config[guild_id].setdefault("invited_by", {})      # {new_member_id: inviter_id}
+    return config[guild_id]
+
+
+async def track_invite_on_join(member: discord.Member):
+    """Compare le cache d'invitations avant/après l'arrivée du membre pour déterminer
+    qui l'a invité, puis met à jour le compteur d'invitations de l'inviteur."""
+    guild = member.guild
+
+    try:
+        new_invites = await guild.invites()
+    except discord.Forbidden:
+        return
+
+    old_cache = bot.invite_cache.get(guild.id, {})
+    new_cache = {invite.code: invite.uses for invite in new_invites}
+
+    used_invite = None
+    for invite in new_invites:
+        old_uses = old_cache.get(invite.code, 0)
+        if invite.uses > old_uses:
+            used_invite = invite
+            break
+
+    # Mise à jour du cache dans tous les cas, même si on n'a pas pu déterminer l'invitation utilisée
+    # (par exemple : invitation à usage unique déjà consommée puis supprimée par Discord)
+    bot.invite_cache[guild.id] = new_cache
+
+    if used_invite is None or used_invite.inviter is None:
+        return
+
+    config = load_config()
+    guild_id = str(guild.id)
+    data = get_invite_data(config, guild_id)
+
+    inviter_id = str(used_invite.inviter.id)
+    data["invite_counts"][inviter_id] = data["invite_counts"].get(inviter_id, 0) + 1
+    data["invited_by"][str(member.id)] = inviter_id
+    save_config(config)
+
+
+@bot.tree.command(name="invituser", description="Affiche le nombre d'invitations d'un membre.")
+@app_commands.describe(membre="Le membre dont vous souhaitez voir les invitations (vous-même par défaut)")
+async def invituser(interaction: discord.Interaction, membre: discord.Member = None):
+    membre = membre or interaction.user
+
+    config = load_config()
+    guild_id = str(interaction.guild.id)
+    data = get_invite_data(config, guild_id)
+    save_config(config)
+
+    count = data["invite_counts"].get(str(membre.id), 0)
+
+    embed = discord.Embed(
+        title="📨 Suivi des invitations",
+        description=f"{membre.mention} a invité **{count}** membre(s) sur ce serveur.",
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="invitesleaderboard", description="Affiche le classement des membres ayant le plus invité sur le serveur.")
+async def invitesleaderboard(interaction: discord.Interaction):
+    config = load_config()
+    guild_id = str(interaction.guild.id)
+    data = get_invite_data(config, guild_id)
+    save_config(config)
+
+    counts = data["invite_counts"]
+    if not counts:
+        await interaction.response.send_message("❌ Aucune invitation n'a encore été enregistrée sur ce serveur.", ephemeral=True)
+        return
+
+    sorted_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (user_id, count) in enumerate(sorted_counts):
+        prefix = medals[i] if i < len(medals) else f"**#{i + 1}**"
+        lines.append(f"{prefix} <@{user_id}> — **{count}** invitation(s)")
+
+    embed = discord.Embed(
+        title="🏆 Classement des invitations",
+        description="\n".join(lines),
+        color=discord.Color.gold()
+    )
+    await interaction.response.send_message(embed=embed)
 
 
 # --- Commandes d'Administration & Configuration ---
@@ -1791,6 +1919,193 @@ async def setupticketgroup(interaction: discord.Interaction):
             view=view,
             ephemeral=True
         )
+
+
+# ==================== GESTION DES TICKETS EXISTANTS (/manageticket) ====================
+# Permet de modifier ou supprimer un panel de ticket déjà publié, directement
+# depuis une liste déroulante, sans devoir tout reconfigurer manuellement.
+
+class ManageTicketSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild, panels: list):
+        self.guild = guild
+        self.panels = panels
+        options = []
+        for p in panels:
+            channel = guild.get_channel(p.get("panel_channel_id")) if p.get("panel_channel_id") else None
+            channel_desc = f"#{channel.name}" if channel else "salon introuvable"
+            options.append(
+                discord.SelectOption(
+                    label=f"Panel #{p.get('id')} - {p.get('embed_title', 'Sans titre')}"[:100],
+                    value=str(p.get("id")),
+                    description=channel_desc[:100],
+                    emoji="🎫"
+                )
+            )
+        super().__init__(
+            placeholder="Choisissez le panel de ticket à gérer...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        panel_id = int(self.values[0])
+        panel_data = next((p for p in self.panels if p.get("id") == panel_id), None)
+        if not panel_data:
+            await interaction.response.edit_message(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+            return
+
+        channel = self.guild.get_channel(panel_data.get("panel_channel_id")) if panel_data.get("panel_channel_id") else None
+        embed = discord.Embed(
+            title=f"🎫 Gestion du panel #{panel_id}",
+            description=f"**Titre :** {panel_data.get('embed_title', 'Sans titre')}\n"
+                        f"**Salon :** {channel.mention if channel else '❌ salon introuvable'}\n\n"
+                        "Que souhaitez-vous faire avec ce panel ?",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=ManageTicketActionsView(self.guild, panel_id)
+        )
+
+
+class ManageTicketSelectView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, panels: list):
+        super().__init__(timeout=300)
+        self.add_item(ManageTicketSelect(guild, panels))
+
+
+class ManageTicketActionsView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, panel_id: int):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.panel_id = panel_id
+
+    @discord.ui.button(label="✏️ Modifier", style=discord.ButtonStyle.primary, emoji="✏️", custom_id="manage_ticket_edit")
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        panel_data = get_ticket_panel(str(self.guild.id), self.panel_id)
+        if not panel_data:
+            await interaction.response.edit_message(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+            return
+
+        view = TicketSetupView(self.guild.id, panel_data=panel_data, panel_id=self.panel_id)
+        await interaction.response.edit_message(
+            content=(
+                "**🎫 Modification du panel de ticket**\n"
+                "Ajustez les paramètres ci-dessous puis enregistrez les modifications."
+            ),
+            embed=view.build_preview_embed(),
+            view=view
+        )
+
+    @discord.ui.button(label="🗑️ Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="manage_ticket_delete")
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="⚠️ Confirmation de suppression",
+            description=f"Êtes-vous sûr de vouloir supprimer le panel #{self.panel_id} ? "
+                        "Le message du panel sera supprimé et les membres ne pourront plus ouvrir de ticket depuis celui-ci. "
+                        "Cette action est irréversible.",
+            color=discord.Color.red()
+        )
+        await interaction.response.edit_message(embed=embed, view=ManageTicketDeleteConfirmView(self.guild, self.panel_id))
+
+    @discord.ui.button(label="⬅️ Retour", style=discord.ButtonStyle.secondary, custom_id="manage_ticket_back")
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        panels = get_ticket_panels(str(self.guild.id))
+        if not panels:
+            await interaction.response.edit_message(
+                content="❌ Il n'y a plus aucun panel de ticket sur ce serveur.",
+                embed=None,
+                view=None
+            )
+            return
+
+        embed = discord.Embed(
+            title="🎫 Gestion des panels de tickets",
+            description="Choisissez un panel ci-dessous pour le modifier ou le supprimer.",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=ManageTicketSelectView(self.guild, panels)
+        )
+
+
+class ManageTicketDeleteConfirmView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, panel_id: int):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.panel_id = panel_id
+
+    @discord.ui.button(label="✅ Confirmer la suppression", style=discord.ButtonStyle.danger, custom_id="manage_ticket_confirm_delete")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        config = load_config()
+        guild_id = str(self.guild.id)
+        panels = config.get(guild_id, {}).get("ticket_panels", [])
+        panel_data = next((p for p in panels if p.get("id") == self.panel_id), None)
+
+        if not panel_data:
+            await interaction.edit_original_response(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+            return
+
+        # Suppression du message publié du panel, si celui-ci existe encore
+        if panel_data.get("panel_message_id") and panel_data.get("panel_channel_id"):
+            channel = self.guild.get_channel(panel_data["panel_channel_id"])
+            if channel:
+                try:
+                    message = await channel.fetch_message(panel_data["panel_message_id"])
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+        # Retrait du panel de la config, ainsi que de tout panel regroupé qui le référence
+        panels = [p for p in panels if p.get("id") != self.panel_id]
+        config[guild_id]["ticket_panels"] = panels
+
+        groups = config.get(guild_id, {}).get("ticket_group_panels", [])
+        for group in groups:
+            if self.panel_id in group.get("panel_ids", []):
+                group["panel_ids"] = [pid for pid in group["panel_ids"] if pid != self.panel_id]
+        config[guild_id]["ticket_group_panels"] = groups
+        save_config(config)
+
+        await interaction.edit_original_response(
+            content=f"🗑️ Le panel #{self.panel_id} a été supprimé avec succès.",
+            embed=None,
+            view=None
+        )
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="manage_ticket_cancel_delete")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title=f"🎫 Gestion du panel #{self.panel_id}",
+            description="Suppression annulée. Que souhaitez-vous faire avec ce panel ?",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.edit_message(embed=embed, view=ManageTicketActionsView(self.guild, self.panel_id))
+
+
+@bot.tree.command(name="manageticket", description="Modifier ou supprimer un panel de ticket existant.")
+@app_commands.default_permissions(administrator=True)
+async def manageticket(interaction: discord.Interaction):
+    panels = get_ticket_panels(str(interaction.guild.id))
+    if not panels:
+        await interaction.response.send_message(
+            "❌ Aucun panel de ticket n'a encore été créé sur ce serveur. Utilisez `/setupticket` pour en créer un.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="🎫 Gestion des panels de tickets",
+        description="Choisissez un panel ci-dessous pour le modifier ou le supprimer.",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=ManageTicketSelectView(interaction.guild, panels), ephemeral=True)
 
 
 # --- Serveur HTTP minimal pour garder le bot actif sur Render (Web Service) ---
