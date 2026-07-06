@@ -486,7 +486,13 @@ class RulesBot(commands.Bot):
         for guild_id, guild_config in config.items():
             for entry in guild_config.get("selfroles", []):
                 self.add_view(SelfRoleView(entry["role_id"], entry["label"], entry.get("emoji")))
-        
+
+        # Système de tickets : vue générique de fermeture + panels déjà publiés
+        self.add_view(TicketActionView())
+        for guild_id, guild_config in config.items():
+            if "ticket_panel" in guild_config:
+                self.add_view(TicketPanelView(int(guild_id)))
+
         # Synchronisation globale des commandes slash
         await self.tree.sync()
 
@@ -752,6 +758,468 @@ async def clear(interaction: discord.Interaction, nombre: int):
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=nombre)
     await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés avec succès.")
+
+
+# ==================== SYSTÈME DE TICKETS ====================
+
+def get_ticket_config(guild_id: str):
+    config = load_config()
+    return config.get(guild_id, {}).get("ticket_panel")
+
+
+def get_next_ticket_number(guild_id: str) -> int:
+    config = load_config()
+    if guild_id not in config:
+        config[guild_id] = {}
+    current = config[guild_id].get("ticket_counter", 0) + 1
+    config[guild_id]["ticket_counter"] = current
+    save_config(config)
+    return current
+
+
+# --- Modale de personnalisation de l'embed du panel de ticket ---
+class TicketEmbedModal(discord.ui.Modal):
+    def __init__(self, setup_view: "TicketSetupView"):
+        super().__init__(title="Personnalisation du Panel de Ticket")
+        self.setup_view = setup_view
+
+        self.titre = discord.ui.TextInput(
+            label="Titre de l'embed",
+            default=setup_view.data["embed_title"],
+            required=True,
+            max_length=100
+        )
+        self.description = discord.ui.TextInput(
+            label="Description de l'embed",
+            style=discord.TextStyle.paragraph,
+            default=setup_view.data["embed_description"],
+            required=True,
+            max_length=1000
+        )
+        self.couleur = discord.ui.TextInput(
+            label="Couleur (nom ou hex, ex: bleu / #5865F2)",
+            default=setup_view.data["embed_color"],
+            required=False,
+            max_length=20
+        )
+        self.bouton_texte = discord.ui.TextInput(
+            label="Texte du bouton",
+            default=setup_view.data["button_label"],
+            required=True,
+            max_length=80
+        )
+        self.bouton_emoji = discord.ui.TextInput(
+            label="Emoji du bouton (facultatif)",
+            default=setup_view.data["button_emoji"] or "",
+            required=False,
+            max_length=50
+        )
+        self.add_item(self.titre)
+        self.add_item(self.description)
+        self.add_item(self.couleur)
+        self.add_item(self.bouton_texte)
+        self.add_item(self.bouton_emoji)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.setup_view.data["embed_title"] = self.titre.value
+        self.setup_view.data["embed_description"] = self.description.value
+        self.setup_view.data["embed_color"] = self.couleur.value or "bleu"
+        self.setup_view.data["button_label"] = self.bouton_texte.value
+        self.setup_view.data["button_emoji"] = parse_emoji(self.bouton_emoji.value)
+
+        await interaction.response.edit_message(
+            embed=self.setup_view.build_preview_embed(),
+            view=self.setup_view
+        )
+
+
+# --- Modale de saisie des questions préalables (jusqu'à 5) ---
+class TicketQuestionsModal(discord.ui.Modal):
+    def __init__(self, setup_view: "TicketSetupView"):
+        super().__init__(title="Questions avant ouverture de ticket")
+        self.setup_view = setup_view
+
+        existing = setup_view.data.get("questions", [])
+        defaults = [q["text"] for q in existing]
+        while len(defaults) < 5:
+            defaults.append("")
+
+        self.q1 = discord.ui.TextInput(label="Question 1", default=defaults[0], required=True, max_length=200)
+        self.q2 = discord.ui.TextInput(label="Question 2 (facultative)", default=defaults[1], required=False, max_length=200)
+        self.q3 = discord.ui.TextInput(label="Question 3 (facultative)", default=defaults[2], required=False, max_length=200)
+        self.q4 = discord.ui.TextInput(label="Question 4 (facultative)", default=defaults[3], required=False, max_length=200)
+        self.q5 = discord.ui.TextInput(label="Question 5 (facultative)", default=defaults[4], required=False, max_length=200)
+        for item in (self.q1, self.q2, self.q3, self.q4, self.q5):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        old_required = {q["text"]: q["required"] for q in self.setup_view.data.get("questions", [])}
+        new_questions = []
+        for field in (self.q1, self.q2, self.q3, self.q4, self.q5):
+            text = field.value.strip()
+            if text:
+                new_questions.append({
+                    "text": text,
+                    "required": old_required.get(text, False)
+                })
+
+        self.setup_view.data["questions"] = new_questions
+        self.setup_view.data["questions_enabled"] = bool(new_questions)
+        self.setup_view.refresh_buttons()
+
+        await interaction.response.edit_message(
+            embed=self.setup_view.build_preview_embed(),
+            view=self.setup_view
+        )
+
+        if new_questions:
+            await interaction.followup.send(
+                "Sélectionnez maintenant les questions auxquelles il est **obligatoire** de répondre "
+                "(les autres resteront facultatives) :",
+                view=TicketRequiredQuestionsView(self.setup_view),
+                ephemeral=True
+            )
+
+
+# --- Sélection multiple des questions obligatoires ---
+class TicketRequiredQuestionsSelect(discord.ui.Select):
+    def __init__(self, setup_view: "TicketSetupView"):
+        self.setup_view = setup_view
+        options = [
+            discord.SelectOption(
+                label=q["text"][:100],
+                value=str(i),
+                default=q["required"]
+            )
+            for i, q in enumerate(setup_view.data["questions"])
+        ]
+        super().__init__(
+            placeholder="Questions obligatoires (aucune = tout facultatif)...",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_indexes = set(int(v) for v in self.values)
+        for i, question in enumerate(self.setup_view.data["questions"]):
+            question["required"] = i in selected_indexes
+        await interaction.response.edit_message(
+            content="✅ Questions obligatoires mises à jour ! Retournez au message de configuration pour publier le panel.",
+            view=None
+        )
+
+
+class TicketRequiredQuestionsView(discord.ui.View):
+    def __init__(self, setup_view: "TicketSetupView"):
+        super().__init__(timeout=300)
+        self.add_item(TicketRequiredQuestionsSelect(setup_view))
+
+
+# --- Sélecteurs de salon / catégorie / rôle support pour le wizard ---
+class TicketPanelChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, setup_view: "TicketSetupView"):
+        self.setup_view = setup_view
+        super().__init__(
+            placeholder="📍 Salon où poster le panel de ticket...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.data["panel_channel_id"] = self.values[0].id
+        await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+class TicketCategorySelect(discord.ui.ChannelSelect):
+    def __init__(self, setup_view: "TicketSetupView"):
+        self.setup_view = setup_view
+        super().__init__(
+            placeholder="📁 Catégorie où créer les salons de tickets...",
+            channel_types=[discord.ChannelType.category],
+            min_values=1,
+            max_values=1,
+            row=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.data["category_id"] = self.values[0].id
+        await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+class TicketSupportRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, setup_view: "TicketSetupView"):
+        self.setup_view = setup_view
+        super().__init__(
+            placeholder="👮 Rôle support (facultatif, voit tous les tickets)...",
+            min_values=0,
+            max_values=1,
+            row=2
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.data["support_role_id"] = self.values[0].id if self.values else None
+        await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+# --- Vue principale de configuration (/setupticket) ---
+class TicketSetupView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=900)
+        self.guild_id = guild_id
+        self.data = {
+            "embed_title": "🎫 Support",
+            "embed_description": "Cliquez sur le bouton ci-dessous pour ouvrir un ticket.",
+            "embed_color": "bleu",
+            "button_label": "Ouvrir un ticket",
+            "button_emoji": "🎫",
+            "panel_channel_id": None,
+            "category_id": None,
+            "support_role_id": None,
+            "questions_enabled": False,
+            "questions": []
+        }
+
+        self.add_item(TicketPanelChannelSelect(self))
+        self.add_item(TicketCategorySelect(self))
+        self.add_item(TicketSupportRoleSelect(self))
+
+    def build_preview_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=self.data["embed_title"],
+            description=self.data["embed_description"],
+            color=parse_color(self.data["embed_color"])
+        )
+        status_lines = [
+            f"**Salon du panel :** <#{self.data['panel_channel_id']}>" if self.data["panel_channel_id"] else "**Salon du panel :** ❌ non défini",
+            f"**Catégorie tickets :** <#{self.data['category_id']}>" if self.data["category_id"] else "**Catégorie tickets :** ❌ non définie",
+            f"**Rôle support :** <@&{self.data['support_role_id']}>" if self.data["support_role_id"] else "**Rôle support :** Aucun (staff par défaut)",
+            f"**Questions préalables :** {'✅ Activées (' + str(len(self.data['questions'])) + ')' if (self.data['questions_enabled'] and self.data['questions']) else '❌ Désactivées'}"
+        ]
+        embed.add_field(name="⚙️ Configuration actuelle", value="\n".join(status_lines), inline=False)
+        return embed
+
+    def refresh_buttons(self):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id == "ticket_setup_configure_questions":
+                item.disabled = not self.data["questions_enabled"]
+            if isinstance(item, discord.ui.Button) and item.custom_id == "ticket_setup_toggle_questions":
+                item.label = "❓ Questions : Activées" if self.data["questions_enabled"] else "❓ Questions : Désactivées"
+                item.style = discord.ButtonStyle.success if self.data["questions_enabled"] else discord.ButtonStyle.secondary
+
+    @discord.ui.button(label="✏️ Personnaliser l'embed", style=discord.ButtonStyle.primary, row=3, custom_id="ticket_setup_edit_embed")
+    async def edit_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketEmbedModal(self))
+
+    @discord.ui.button(label="❓ Questions : Désactivées", style=discord.ButtonStyle.secondary, row=3, custom_id="ticket_setup_toggle_questions")
+    async def toggle_questions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.data["questions_enabled"] = not self.data["questions_enabled"]
+        self.refresh_buttons()
+
+        if self.data["questions_enabled"] and not self.data["questions"]:
+            await interaction.response.edit_message(embed=self.build_preview_embed(), view=self)
+            await interaction.followup.send(
+                "Cliquez sur **📝 Configurer les questions** pour ajouter vos questions.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.edit_message(embed=self.build_preview_embed(), view=self)
+
+    @discord.ui.button(label="📝 Configurer les questions", style=discord.ButtonStyle.secondary, row=3, custom_id="ticket_setup_configure_questions", disabled=True)
+    async def configure_questions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketQuestionsModal(self))
+
+    @discord.ui.button(label="✅ Publier le panel", style=discord.ButtonStyle.success, row=4, custom_id="ticket_setup_publish")
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.data["panel_channel_id"] or not self.data["category_id"]:
+            await interaction.response.send_message(
+                "❌ Vous devez sélectionner un **salon** pour le panel et une **catégorie** pour les tickets avant de publier.",
+                ephemeral=True
+            )
+            return
+
+        config = load_config()
+        guild_id = str(self.guild_id)
+        if guild_id not in config:
+            config[guild_id] = {}
+        config[guild_id]["ticket_panel"] = self.data
+        save_config(config)
+
+        channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+        embed = discord.Embed(
+            title=self.data["embed_title"],
+            description=self.data["embed_description"],
+            color=parse_color(self.data["embed_color"])
+        )
+        panel_view = TicketPanelView(self.guild_id)
+        await channel.send(embed=embed, view=panel_view)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Le panel de ticket a été publié dans {channel.mention} !",
+            embed=None,
+            view=self
+        )
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.danger, row=4, custom_id="ticket_setup_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Configuration annulée.", embed=None, view=self)
+
+
+# --- Modale affichée à l'utilisateur qui ouvre un ticket avec questions ---
+class TicketAnswerModal(discord.ui.Modal):
+    def __init__(self, guild_id: int, questions: list):
+        super().__init__(title="Ouverture de ticket")
+        self.guild_id = guild_id
+        self.inputs = []
+        for q in questions[:5]:
+            text_input = discord.ui.TextInput(
+                label=q["text"][:45],
+                style=discord.TextStyle.paragraph,
+                required=q["required"],
+                max_length=500
+            )
+            self.add_item(text_input)
+            self.inputs.append((q["text"], text_input))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        answers = [(label, field.value) for label, field in self.inputs if field.value]
+        await create_ticket_channel(interaction, self.guild_id, answers)
+
+
+# --- Bouton persistant du panel public ("Ouvrir un ticket") ---
+class TicketPanelButton(discord.ui.Button):
+    def __init__(self, guild_id: int, label: str, emoji: str = None):
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.primary,
+            emoji=emoji if emoji else "🎫",
+            custom_id=f"ticket_create_{guild_id}"
+        )
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        cfg = get_ticket_config(str(self.guild_id))
+        if not cfg:
+            await interaction.response.send_message("❌ Le système de tickets n'est plus configuré.", ephemeral=True)
+            return
+
+        if cfg.get("questions_enabled") and cfg.get("questions"):
+            await interaction.response.send_modal(TicketAnswerModal(self.guild_id, cfg["questions"]))
+        else:
+            await interaction.response.defer(ephemeral=True)
+            await create_ticket_channel(interaction, self.guild_id, [])
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        config = load_config()
+        cfg = config.get(str(guild_id), {}).get("ticket_panel", {})
+        label = cfg.get("button_label", "Ouvrir un ticket")
+        emoji = cfg.get("button_emoji", "🎫")
+        self.add_item(TicketPanelButton(guild_id, label, emoji))
+
+
+# --- Création effective du salon de ticket ---
+async def create_ticket_channel(interaction: discord.Interaction, guild_id: int, answers: list):
+    config = load_config()
+    cfg = config.get(str(guild_id), {}).get("ticket_panel")
+    if not cfg:
+        await interaction.followup.send("❌ Le système de tickets n'est plus configuré.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    category = guild.get_channel(cfg["category_id"])
+    ticket_number = get_next_ticket_number(str(guild_id))
+    channel_name = f"ticket-{ticket_number:04d}"
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    }
+    support_role_id = cfg.get("support_role_id")
+    support_role = guild.get_role(support_role_id) if support_role_id else None
+    if support_role:
+        overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    try:
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"Ticket ouvert par {interaction.user}"
+        )
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Permissions insuffisantes pour créer le salon de ticket.", ephemeral=True)
+        return
+
+    description = f"Bonjour {interaction.user.mention}, un membre du support va vous répondre sous peu."
+    if support_role:
+        description += f"\n{support_role.mention}"
+
+    embed = discord.Embed(
+        title=f"🎫 Ticket #{ticket_number:04d}",
+        description=description,
+        color=discord.Color.blurple()
+    )
+    for question_text, answer in answers:
+        embed.add_field(name=question_text, value=answer[:1024], inline=False)
+    embed.set_footer(text=f"Ouvert par {interaction.user.display_name}")
+    embed.timestamp = datetime.datetime.now()
+
+    await ticket_channel.send(embed=embed, view=TicketActionView())
+    await interaction.followup.send(f"✅ Votre ticket a été créé : {ticket_channel.mention}", ephemeral=True)
+
+
+# --- Bouton persistant de fermeture, présent dans chaque salon de ticket ---
+class TicketActionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close_button")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f"🔒 Ticket fermé par {interaction.user.mention}. Suppression dans 5 secondes...")
+
+        channel = interaction.channel
+        try:
+            for target, ow in list(channel.overwrites.items()):
+                if isinstance(target, discord.Member):
+                    ow.send_messages = False
+                    await channel.set_permissions(target, overwrite=ow)
+        except discord.Forbidden:
+            pass
+
+        await asyncio.sleep(5)
+        try:
+            await channel.delete(reason=f"Ticket fermé par {interaction.user}")
+        except discord.Forbidden:
+            await channel.send("❌ Permissions insuffisantes pour supprimer ce salon.")
+
+
+# --- Commande /setupticket : ouverture du wizard de configuration ---
+@bot.tree.command(name="setupticket", description="Configurer et publier un panel de création de tickets.")
+@app_commands.default_permissions(administrator=True)
+async def setupticket(interaction: discord.Interaction):
+    view = TicketSetupView(interaction.guild.id)
+    await interaction.response.send_message(
+        content=(
+            "**🎫 Configuration du système de tickets**\n"
+            "1️⃣ Personnalisez l'embed, 2️⃣ choisissez le salon et la catégorie, "
+            "3️⃣ activez les questions préalables si besoin, puis publiez."
+        ),
+        embed=view.build_preview_embed(),
+        view=view,
+        ephemeral=True
+    )
 
 
 # --- Serveur HTTP minimal pour garder le bot actif sur Render (Web Service) ---
