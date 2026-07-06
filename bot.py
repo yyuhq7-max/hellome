@@ -527,46 +527,157 @@ class StickyImageView(discord.ui.View):
         self.add_item(StickyImageChannelSelect())
 
 
+class StickyImageResetSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Sélectionnez le salon à réinitialiser...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            custom_id="persistent_stickyimage_reset_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+
+        config = load_config()
+        guild_id = str(interaction.guild.id)
+        sticky_images = config.get(guild_id, {}).get("sticky_images", {})
+        channel_key = str(channel.id)
+
+        if channel_key not in sticky_images:
+            await interaction.response.send_message(
+                f"❌ Aucune image fixe n'est configurée pour {channel.mention}.",
+                ephemeral=True
+            )
+            return
+
+        entry = sticky_images.pop(channel_key)
+        config[guild_id]["sticky_images"] = sticky_images
+        save_config(config)
+
+        # Suppression du dernier message-image encore présent dans le salon, si possible
+        old_message_id = entry.get("last_message_id")
+        if old_message_id:
+            try:
+                old_message = await channel.fetch_message(old_message_id)
+                await old_message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        await interaction.response.send_message(
+            f"✅ **Image fixe réinitialisée** pour {channel.mention} ! Le système est désormais désactivé sur ce salon.",
+            ephemeral=True
+        )
+
+
+class StickyImageResetView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(StickyImageResetSelect())
+
+
 # --- Dashboard de configuration central (/setup) ---
+class SetupDashboardSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Rôle Automatique (Autorole)",
+                value="autorole",
+                emoji="👤",
+                description="Attribuer un rôle par défaut aux nouveaux membres."
+            ),
+            discord.SelectOption(
+                label="Rôle par Bouton (Self-Role)",
+                value="selfrole",
+                emoji="🎭",
+                description="Créer un bouton permettant d'obtenir un rôle."
+            ),
+            discord.SelectOption(
+                label="Image Fixe (Bas de salon)",
+                value="stickyimage",
+                emoji="🖼️",
+                description="Garder une image toujours affichée en bas d'un salon."
+            ),
+            discord.SelectOption(
+                label="Réinitialiser Image Fixe",
+                value="stickyimage_reset",
+                emoji="🗑️",
+                description="Désactiver le système d'image fixe sur un salon."
+            ),
+        ]
+        super().__init__(
+            placeholder="Choisissez le service à configurer...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="persistent_setup_dashboard_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+
+        if choice == "autorole":
+            embed = discord.Embed(
+                title="👤 Configuration de l'Autorole",
+                description="Choisissez dans le menu déroulant ci-dessous le rôle à attribuer automatiquement aux nouveaux membres dès leur arrivée.",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, view=AutoroleView(), ephemeral=True)
+
+        elif choice == "selfrole":
+            embed = discord.Embed(
+                title="🎭 Créer un Rôle par Bouton",
+                description="Sélectionnez le rôle que les membres pourront obtenir (ou retirer) en cliquant sur un bouton.\n\n"
+                            "Vous pourrez ensuite personnaliser entièrement :\n"
+                            "• Le **titre** de l'embed\n"
+                            "• La **description** de l'embed\n"
+                            "• La **couleur** de l'embed\n"
+                            "• Le **texte** du bouton\n"
+                            "• L'**emoji** du bouton",
+                color=discord.Color.blurple()
+            )
+            await interaction.response.send_message(embed=embed, view=SelfRoleConfigView(), ephemeral=True)
+
+        elif choice == "stickyimage":
+            embed = discord.Embed(
+                title="🖼️ Configuration de l'Image Fixe",
+                description="Sélectionnez le salon dans lequel une image doit toujours rester tout en bas.\n\n"
+                            "Dès qu'un membre enverra un nouveau message dans ce salon, le bot supprimera "
+                            "automatiquement son précédent message-image puis le renverra, pour que l'image "
+                            "soit toujours le dernier message du salon.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, view=StickyImageView(), ephemeral=True)
+
+        elif choice == "stickyimage_reset":
+            config = load_config()
+            guild_id = str(interaction.guild.id)
+            sticky_images = config.get(guild_id, {}).get("sticky_images", {})
+
+            if sticky_images:
+                lines = []
+                for channel_id in sticky_images:
+                    channel = interaction.guild.get_channel(int(channel_id))
+                    lines.append(channel.mention if channel else f"❌ Salon introuvable (`{channel_id}`)")
+                channels_txt = "\n".join(lines)
+            else:
+                channels_txt = "Aucun salon n'a actuellement d'image fixe configurée."
+
+            embed = discord.Embed(
+                title="🗑️ Réinitialisation de l'Image Fixe",
+                description="Sélectionnez le salon pour lequel vous souhaitez **désactiver** le système d'image fixe.\n\n"
+                            "Cela supprime la configuration ainsi que le dernier message-image encore présent dans ce salon.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="📋 Salons actuellement configurés", value=channels_txt, inline=False)
+            await interaction.response.send_message(embed=embed, view=StickyImageResetView(), ephemeral=True)
+
+
 class SetupDashboardView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label="Rôle Automatique (Autorole)", style=discord.ButtonStyle.primary, emoji="👤", custom_id="dashboard_autorole")
-    async def configure_autorole(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="👤 Configuration de l'Autorole",
-            description="Choisissez dans le menu déroulant ci-dessous le rôle à attribuer automatiquement aux nouveaux membres dès leur arrivée.",
-            color=discord.Color.blue()
-        )
-        await interaction.response.send_message(embed=embed, view=AutoroleView(), ephemeral=True)
-
-    @discord.ui.button(label="Rôle par Bouton (Self-Role)", style=discord.ButtonStyle.secondary, emoji="🎭", custom_id="dashboard_selfrole")
-    async def configure_selfrole(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="🎭 Créer un Rôle par Bouton",
-            description="Sélectionnez le rôle que les membres pourront obtenir (ou retirer) en cliquant sur un bouton.\n\n"
-                        "Vous pourrez ensuite personnaliser entièrement :\n"
-                        "• Le **titre** de l'embed\n"
-                        "• La **description** de l'embed\n"
-                        "• La **couleur** de l'embed\n"
-                        "• Le **texte** du bouton\n"
-                        "• L'**emoji** du bouton",
-            color=discord.Color.blurple()
-        )
-        await interaction.response.send_message(embed=embed, view=SelfRoleConfigView(), ephemeral=True)
-
-    @discord.ui.button(label="Image Fixe (Bas de salon)", style=discord.ButtonStyle.success, emoji="🖼️", custom_id="dashboard_stickyimage")
-    async def configure_stickyimage(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="🖼️ Configuration de l'Image Fixe",
-            description="Sélectionnez le salon dans lequel une image doit toujours rester tout en bas.\n\n"
-                        "Dès qu'un membre enverra un nouveau message dans ce salon, le bot supprimera "
-                        "automatiquement son précédent message-image puis le renverra, pour que l'image "
-                        "soit toujours le dernier message du salon.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, view=StickyImageView(), ephemeral=True)
+        self.add_item(SetupDashboardSelect())
 
 
 # --- Système de participation pour les Giveaways ---
@@ -609,6 +720,7 @@ class RulesBot(commands.Bot):
         self.add_view(SetupDashboardView())
         self.add_view(SelfRoleConfigView())
         self.add_view(StickyImageView())
+        self.add_view(StickyImageResetView())
 
         # Ré-enregistrement de tous les boutons de rôle déjà configurés
         config = load_config()
@@ -897,7 +1009,8 @@ async def setup(interaction: discord.Interaction):
         description="Choisissez la configuration que vous souhaitez ajuster ou activer sur votre serveur : \n\n"
                     "👤 **Rôle Automatique (Autorole)** : Attribuer un rôle par défaut aux arrivants.\n"
                     "🎭 **Rôle par Bouton (Self-Role)** : Créer un embed avec un bouton entièrement personnalisable (titre, description, couleur, texte et emoji du bouton) permettant aux membres d'obtenir un rôle.\n"
-                    "🖼️ **Image Fixe (Bas de salon)** : Garder une image toujours affichée tout en bas d'un salon choisi.",
+                    "🖼️ **Image Fixe (Bas de salon)** : Garder une image toujours affichée tout en bas d'un salon choisi.\n"
+                    "🗑️ **Réinitialiser Image Fixe** : Désactiver le système d'image fixe sur un salon.",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
