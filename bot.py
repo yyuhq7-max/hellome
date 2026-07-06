@@ -1300,7 +1300,7 @@ class TicketSetupView(discord.ui.View):
             config[guild_id]["ticket_panels"] = panels
             save_config(config)
 
-            confirmation = f"✅ Le panel de ticket a été publié dans {channel.mention} !"
+            confirmation = f"✅ Le panel de ticket a été publié dans {channel.mention} ! Il est désormais géré via `/manageticket`."
 
         for item in self.children:
             item.disabled = True
@@ -1623,7 +1623,7 @@ class GroupSetupView(discord.ui.View):
             config[guild_id]["ticket_group_panels"] = groups
             save_config(config)
 
-            confirmation = f"✅ Le panel regroupé a été publié dans {channel.mention} !"
+            confirmation = f"✅ Le panel regroupé a été publié dans {channel.mention} ! Il est désormais géré via `/manageticket`."
 
         for item in self.children:
             item.disabled = True
@@ -1924,11 +1924,41 @@ async def setupticketgroup(interaction: discord.Interaction):
 # ==================== GESTION DES TICKETS EXISTANTS (/manageticket) ====================
 # Permet de modifier ou supprimer un panel de ticket déjà publié, directement
 # depuis une liste déroulante, sans devoir tout reconfigurer manuellement.
+#
+# Dès qu'un panel (individuel via /setupticket ou regroupé via /setupticketgroup)
+# est créé, il est automatiquement enregistré dans config.json (ticket_panels /
+# ticket_group_panels). /manageticket relit systématiquement cette configuration
+# à chaque appel : tout panel nouvellement créé apparaît donc immédiatement dans
+# la liste, sans redémarrage ni action supplémentaire.
+
+def build_manage_ticket_embed(guild: discord.Guild, panels: list, groups: list) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎫 Gestion des panels de tickets",
+        description="Choisissez un panel ci-dessous pour le modifier ou le supprimer.",
+        color=discord.Color.blurple()
+    )
+    if panels:
+        lines = []
+        for p in panels:
+            channel = guild.get_channel(p.get("panel_channel_id")) if p.get("panel_channel_id") else None
+            channel_txt = channel.mention if channel else "❌ salon supprimé"
+            lines.append(f"**Panel #{p.get('id')}** — {p.get('embed_title', 'Sans titre')} ({channel_txt})")
+        embed.add_field(name="🎫 Panels individuels", value="\n".join(lines), inline=False)
+    if groups:
+        lines = []
+        for g in groups:
+            channel = guild.get_channel(g.get("panel_channel_id")) if g.get("panel_channel_id") else None
+            channel_txt = channel.mention if channel else "❌ salon supprimé"
+            lines.append(f"**Groupe #{g.get('id')}** — {g.get('embed_title', 'Sans titre')} ({channel_txt})")
+        embed.add_field(name="🗂️ Panels regroupés", value="\n".join(lines), inline=False)
+    return embed
+
 
 class ManageTicketSelect(discord.ui.Select):
-    def __init__(self, guild: discord.Guild, panels: list):
+    def __init__(self, guild: discord.Guild, panels: list, groups: list):
         self.guild = guild
         self.panels = panels
+        self.groups = groups
         options = []
         for p in panels:
             channel = guild.get_channel(p.get("panel_channel_id")) if p.get("panel_channel_id") else None
@@ -1936,84 +1966,121 @@ class ManageTicketSelect(discord.ui.Select):
             options.append(
                 discord.SelectOption(
                     label=f"Panel #{p.get('id')} - {p.get('embed_title', 'Sans titre')}"[:100],
-                    value=str(p.get("id")),
+                    value=f"panel:{p.get('id')}",
                     description=channel_desc[:100],
                     emoji="🎫"
                 )
             )
+        for g in groups:
+            channel = guild.get_channel(g.get("panel_channel_id")) if g.get("panel_channel_id") else None
+            channel_desc = f"#{channel.name}" if channel else "salon introuvable"
+            options.append(
+                discord.SelectOption(
+                    label=f"Groupe #{g.get('id')} - {g.get('embed_title', 'Sans titre')}"[:100],
+                    value=f"group:{g.get('id')}",
+                    description=channel_desc[:100],
+                    emoji="🗂️"
+                )
+            )
         super().__init__(
-            placeholder="Choisissez le panel de ticket à gérer...",
+            placeholder="Choisissez le panel (ou groupe) de ticket à gérer...",
             min_values=1,
             max_values=1,
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        panel_id = int(self.values[0])
-        panel_data = next((p for p in self.panels if p.get("id") == panel_id), None)
-        if not panel_data:
-            await interaction.response.edit_message(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+        kind, raw_id = self.values[0].split(":")
+        item_id = int(raw_id)
+
+        if kind == "panel":
+            item_data = next((p for p in self.panels if p.get("id") == item_id), None)
+            title_prefix = "panel"
+        else:
+            item_data = next((g for g in self.groups if g.get("id") == item_id), None)
+            title_prefix = "groupe"
+
+        if not item_data:
+            await interaction.response.edit_message(content="❌ Cet élément n'existe plus.", embed=None, view=None)
             return
 
-        channel = self.guild.get_channel(panel_data.get("panel_channel_id")) if panel_data.get("panel_channel_id") else None
+        channel = self.guild.get_channel(item_data.get("panel_channel_id")) if item_data.get("panel_channel_id") else None
         embed = discord.Embed(
-            title=f"🎫 Gestion du panel #{panel_id}",
-            description=f"**Titre :** {panel_data.get('embed_title', 'Sans titre')}\n"
+            title=f"🎫 Gestion du {title_prefix} #{item_id}",
+            description=f"**Titre :** {item_data.get('embed_title', 'Sans titre')}\n"
                         f"**Salon :** {channel.mention if channel else '❌ salon introuvable'}\n\n"
-                        "Que souhaitez-vous faire avec ce panel ?",
+                        "Que souhaitez-vous faire ?",
             color=discord.Color.blurple()
         )
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=ManageTicketActionsView(self.guild, panel_id)
+            view=ManageTicketActionsView(self.guild, kind, item_id)
         )
 
 
 class ManageTicketSelectView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, panels: list):
+    def __init__(self, guild: discord.Guild, panels: list, groups: list):
         super().__init__(timeout=300)
-        self.add_item(ManageTicketSelect(guild, panels))
+        self.add_item(ManageTicketSelect(guild, panels, groups))
 
 
 class ManageTicketActionsView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, panel_id: int):
+    def __init__(self, guild: discord.Guild, kind: str, item_id: int):
         super().__init__(timeout=300)
         self.guild = guild
-        self.panel_id = panel_id
+        self.kind = kind  # "panel" ou "group"
+        self.item_id = item_id
 
     @discord.ui.button(label="✏️ Modifier", style=discord.ButtonStyle.primary, emoji="✏️", custom_id="manage_ticket_edit")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        panel_data = get_ticket_panel(str(self.guild.id), self.panel_id)
-        if not panel_data:
-            await interaction.response.edit_message(content="❌ Ce panel n'existe plus.", embed=None, view=None)
-            return
-
-        view = TicketSetupView(self.guild.id, panel_data=panel_data, panel_id=self.panel_id)
-        await interaction.response.edit_message(
-            content=(
-                "**🎫 Modification du panel de ticket**\n"
-                "Ajustez les paramètres ci-dessous puis enregistrez les modifications."
-            ),
-            embed=view.build_preview_embed(),
-            view=view
-        )
+        if self.kind == "panel":
+            panel_data = get_ticket_panel(str(self.guild.id), self.item_id)
+            if not panel_data:
+                await interaction.response.edit_message(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+                return
+            view = TicketSetupView(self.guild.id, panel_data=panel_data, panel_id=self.item_id)
+            await interaction.response.edit_message(
+                content=(
+                    "**🎫 Modification du panel de ticket**\n"
+                    "Ajustez les paramètres ci-dessous puis enregistrez les modifications."
+                ),
+                embed=view.build_preview_embed(),
+                view=view
+            )
+        else:
+            group_data = get_ticket_group_panel(str(self.guild.id), self.item_id)
+            if not group_data:
+                await interaction.response.edit_message(content="❌ Ce groupe n'existe plus.", embed=None, view=None)
+                return
+            panels = get_ticket_panels(str(self.guild.id))
+            view = GroupSetupView(self.guild.id, panels, group_data=group_data, group_id=self.item_id)
+            await interaction.response.edit_message(
+                content=(
+                    "**🗂️ Modification du panel regroupé**\n"
+                    "Ajustez les paramètres ci-dessous puis enregistrez les modifications."
+                ),
+                embed=view.build_preview_embed(),
+                view=view
+            )
 
     @discord.ui.button(label="🗑️ Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="manage_ticket_delete")
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        label = "panel" if self.kind == "panel" else "groupe"
         embed = discord.Embed(
             title="⚠️ Confirmation de suppression",
-            description=f"Êtes-vous sûr de vouloir supprimer le panel #{self.panel_id} ? "
-                        "Le message du panel sera supprimé et les membres ne pourront plus ouvrir de ticket depuis celui-ci. "
+            description=f"Êtes-vous sûr de vouloir supprimer le {label} #{self.item_id} ? "
+                        "Le message correspondant sera supprimé et les membres ne pourront plus ouvrir de ticket depuis celui-ci. "
                         "Cette action est irréversible.",
             color=discord.Color.red()
         )
-        await interaction.response.edit_message(embed=embed, view=ManageTicketDeleteConfirmView(self.guild, self.panel_id))
+        await interaction.response.edit_message(embed=embed, view=ManageTicketDeleteConfirmView(self.guild, self.kind, self.item_id))
 
     @discord.ui.button(label="⬅️ Retour", style=discord.ButtonStyle.secondary, custom_id="manage_ticket_back")
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         panels = get_ticket_panels(str(self.guild.id))
-        if not panels:
+        groups = get_ticket_group_panels(str(self.guild.id))
+        if not panels and not groups:
             await interaction.response.edit_message(
                 content="❌ Il n'y a plus aucun panel de ticket sur ce serveur.",
                 embed=None,
@@ -2021,23 +2088,20 @@ class ManageTicketActionsView(discord.ui.View):
             )
             return
 
-        embed = discord.Embed(
-            title="🎫 Gestion des panels de tickets",
-            description="Choisissez un panel ci-dessous pour le modifier ou le supprimer.",
-            color=discord.Color.blurple()
-        )
+        embed = build_manage_ticket_embed(self.guild, panels, groups)
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=ManageTicketSelectView(self.guild, panels)
+            view=ManageTicketSelectView(self.guild, panels, groups)
         )
 
 
 class ManageTicketDeleteConfirmView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, panel_id: int):
+    def __init__(self, guild: discord.Guild, kind: str, item_id: int):
         super().__init__(timeout=300)
         self.guild = guild
-        self.panel_id = panel_id
+        self.kind = kind
+        self.item_id = item_id
 
     @discord.ui.button(label="✅ Confirmer la suppression", style=discord.ButtonStyle.danger, custom_id="manage_ticket_confirm_delete")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2045,67 +2109,97 @@ class ManageTicketDeleteConfirmView(discord.ui.View):
 
         config = load_config()
         guild_id = str(self.guild.id)
-        panels = config.get(guild_id, {}).get("ticket_panels", [])
-        panel_data = next((p for p in panels if p.get("id") == self.panel_id), None)
 
-        if not panel_data:
-            await interaction.edit_original_response(content="❌ Ce panel n'existe plus.", embed=None, view=None)
-            return
+        if self.kind == "panel":
+            panels = config.get(guild_id, {}).get("ticket_panels", [])
+            item_data = next((p for p in panels if p.get("id") == self.item_id), None)
 
-        # Suppression du message publié du panel, si celui-ci existe encore
-        if panel_data.get("panel_message_id") and panel_data.get("panel_channel_id"):
-            channel = self.guild.get_channel(panel_data["panel_channel_id"])
-            if channel:
-                try:
-                    message = await channel.fetch_message(panel_data["panel_message_id"])
-                    await message.delete()
-                except (discord.NotFound, discord.Forbidden):
-                    pass
+            if not item_data:
+                await interaction.edit_original_response(content="❌ Ce panel n'existe plus.", embed=None, view=None)
+                return
 
-        # Retrait du panel de la config, ainsi que de tout panel regroupé qui le référence
-        panels = [p for p in panels if p.get("id") != self.panel_id]
-        config[guild_id]["ticket_panels"] = panels
+            # Suppression du message publié du panel, si celui-ci existe encore
+            if item_data.get("panel_message_id") and item_data.get("panel_channel_id"):
+                channel = self.guild.get_channel(item_data["panel_channel_id"])
+                if channel:
+                    try:
+                        message = await channel.fetch_message(item_data["panel_message_id"])
+                        await message.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
 
-        groups = config.get(guild_id, {}).get("ticket_group_panels", [])
-        for group in groups:
-            if self.panel_id in group.get("panel_ids", []):
-                group["panel_ids"] = [pid for pid in group["panel_ids"] if pid != self.panel_id]
-        config[guild_id]["ticket_group_panels"] = groups
-        save_config(config)
+            # Retrait du panel de la config, ainsi que de tout panel regroupé qui le référence
+            panels = [p for p in panels if p.get("id") != self.item_id]
+            config[guild_id]["ticket_panels"] = panels
+
+            groups = config.get(guild_id, {}).get("ticket_group_panels", [])
+            for group in groups:
+                if self.item_id in group.get("panel_ids", []):
+                    group["panel_ids"] = [pid for pid in group["panel_ids"] if pid != self.item_id]
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            confirmation = f"🗑️ Le panel #{self.item_id} a été supprimé avec succès."
+        else:
+            groups = config.get(guild_id, {}).get("ticket_group_panels", [])
+            item_data = next((g for g in groups if g.get("id") == self.item_id), None)
+
+            if not item_data:
+                await interaction.edit_original_response(content="❌ Ce groupe n'existe plus.", embed=None, view=None)
+                return
+
+            # Suppression du message publié du groupe, si celui-ci existe encore
+            if item_data.get("panel_message_id") and item_data.get("panel_channel_id"):
+                channel = self.guild.get_channel(item_data["panel_channel_id"])
+                if channel:
+                    try:
+                        message = await channel.fetch_message(item_data["panel_message_id"])
+                        await message.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+
+            groups = [g for g in groups if g.get("id") != self.item_id]
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            confirmation = f"🗑️ Le panel regroupé #{self.item_id} a été supprimé avec succès."
 
         await interaction.edit_original_response(
-            content=f"🗑️ Le panel #{self.panel_id} a été supprimé avec succès.",
+            content=confirmation,
             embed=None,
             view=None
         )
 
     @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="manage_ticket_cancel_delete")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        label = "panel" if self.kind == "panel" else "groupe"
         embed = discord.Embed(
-            title=f"🎫 Gestion du panel #{self.panel_id}",
-            description="Suppression annulée. Que souhaitez-vous faire avec ce panel ?",
+            title=f"🎫 Gestion du {label} #{self.item_id}",
+            description="Suppression annulée. Que souhaitez-vous faire ?",
             color=discord.Color.blurple()
         )
-        await interaction.response.edit_message(embed=embed, view=ManageTicketActionsView(self.guild, self.panel_id))
+        await interaction.response.edit_message(embed=embed, view=ManageTicketActionsView(self.guild, self.kind, self.item_id))
 
 
-@bot.tree.command(name="manageticket", description="Modifier ou supprimer un panel de ticket existant.")
+@bot.tree.command(name="manageticket", description="Modifier ou supprimer un panel de ticket (ou un panel regroupé) existant.")
 @app_commands.default_permissions(administrator=True)
 async def manageticket(interaction: discord.Interaction):
     panels = get_ticket_panels(str(interaction.guild.id))
-    if not panels:
+    groups = get_ticket_group_panels(str(interaction.guild.id))
+
+    if not panels and not groups:
         await interaction.response.send_message(
             "❌ Aucun panel de ticket n'a encore été créé sur ce serveur. Utilisez `/setupticket` pour en créer un.",
             ephemeral=True
         )
         return
 
-    embed = discord.Embed(
-        title="🎫 Gestion des panels de tickets",
-        description="Choisissez un panel ci-dessous pour le modifier ou le supprimer.",
-        color=discord.Color.blurple()
+    embed = build_manage_ticket_embed(interaction.guild, panels, groups)
+    await interaction.response.send_message(
+        embed=embed,
+        view=ManageTicketSelectView(interaction.guild, panels, groups),
+        ephemeral=True
     )
-    await interaction.response.send_message(embed=embed, view=ManageTicketSelectView(interaction.guild, panels), ephemeral=True)
 
 
 # --- Serveur HTTP minimal pour garder le bot actif sur Render (Web Service) ---
