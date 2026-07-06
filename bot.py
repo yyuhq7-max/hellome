@@ -8,7 +8,9 @@ import random
 import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
 CONFIG_FILE = "config.json"
+
 # Fonctions pour gérer la configuration persistante du bot
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -18,9 +20,11 @@ def load_config():
             return json.load(f)
         except json.JSONDecodeError:
             return {}
+
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
+
 # Conditions Générales d'Utilisation (CGU) / Terms of Service (TOS) du serveur MVP
 RULES = {
     "fr": (
@@ -135,6 +139,7 @@ RULES = {
         "• MVP behält sich das Recht vor, diese Nutzungsbedingungen jederzeit und ohne Vorankündigung zu ändern."
     )
 }
+
 # --- Composants UI pour la sélection de langue ---
 class LanguageSelect(discord.ui.Select):
     def __init__(self):
@@ -153,7 +158,7 @@ class LanguageSelect(discord.ui.Select):
             ),
             discord.SelectOption(
                 label="Español", 
-                description="Leer las reglas del serveur de revente MVP en Español", 
+                description="Leer las règles du serveur de revente MVP en Español", 
                 emoji="🇪🇸", 
                 value="es"
             ),
@@ -171,14 +176,18 @@ class LanguageSelect(discord.ui.Select):
             options=options, 
             custom_id="persistent_rules_select"
         )
+
     async def callback(self, interaction: discord.Interaction):
         selected_lang = self.values[0]
         rules_text = RULES.get(selected_lang, "Règles introuvables.")
         await interaction.response.send_message(rules_text, ephemeral=True)
+
 class RulesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(LanguageSelect())
+
+
 # --- Composants UI pour la configuration de l'Autorole ---
 class RoleSelect(discord.ui.RoleSelect):
     def __init__(self):
@@ -188,6 +197,7 @@ class RoleSelect(discord.ui.RoleSelect):
             max_values=1,
             custom_id="persistent_autorole_select"
         )
+
     async def callback(self, interaction: discord.Interaction):
         role = self.values[0]
         
@@ -202,15 +212,19 @@ class RoleSelect(discord.ui.RoleSelect):
             f"✅ **Rôle automatique configuré** ! Les nouveaux membres recevront le rôle : **{role.name}**.", 
             ephemeral=True
         )
+
 class AutoroleView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(RoleSelect())
+
+
 # --- Modal et Composants pour la réponse automatique dans un salon ---
-class AutoresponderModal(discord.ui.Modal, title="Message de Réponse Automatique"):
+class AutoresponderModal(discord.ui.Modal):
     def __init__(self, channel_id: int):
-        super().__init__()
+        super().__init__(title="Message de Réponse Automatique")
         self.channel_id = channel_id
+
         # Champ de saisie pour le message facultatif à renvoyer automatiquement
         self.response_text = discord.ui.TextInput(
             label="Message textuel facultatif (laisser vide pour l'image seule) :",
@@ -220,6 +234,7 @@ class AutoresponderModal(discord.ui.Modal, title="Message de Réponse Automatiqu
             max_length=1500
         )
         self.add_item(self.response_text)
+
     async def on_submit(self, interaction: discord.Interaction):
         config = load_config()
         guild_id = str(interaction.guild.id)
@@ -229,8 +244,10 @@ class AutoresponderModal(discord.ui.Modal, title="Message de Réponse Automatiqu
         config[guild_id]["autoresponder_channel"] = self.channel_id
         config[guild_id]["autoresponder_message"] = self.response_text.value
         save_config(config)
+
         channel = interaction.guild.get_channel(self.channel_id)
         channel_mention = channel.mention if channel else f"Salon ID: {self.channel_id}"
+
         msg_val = self.response_text.value if self.response_text.value else "(Seulement l'image)"
         await interaction.response.send_message(
             f"✅ **Répondeur automatique activé** avec l'image `vouch.png` !\n"
@@ -238,6 +255,7 @@ class AutoresponderModal(discord.ui.Modal, title="Message de Réponse Automatiqu
             f"• **Texte configuré :** {msg_val}",
             ephemeral=True
         )
+
 class ChannelSelect(discord.ui.ChannelSelect):
     def __init__(self):
         super().__init__(
@@ -247,18 +265,23 @@ class ChannelSelect(discord.ui.ChannelSelect):
             channel_types=[discord.ChannelType.text],
             custom_id="persistent_autoresponder_channel_select"
         )
+
     async def callback(self, interaction: discord.Interaction):
         channel = self.values[0]
         # Ouvrir la boîte modale de saisie de texte à la sélection du salon
         await interaction.response.send_modal(AutoresponderModal(channel.id))
+
 class AutoresponderChannelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(ChannelSelect())
+
+
 # --- Dashboard de configuration central (/setup) ---
 class SetupDashboardView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+
     @discord.ui.button(label="Rôle Automatique (Autorole)", style=discord.ButtonStyle.primary, emoji="👤", custom_id="dashboard_autorole")
     async def configure_autorole(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
@@ -267,6 +290,7 @@ class SetupDashboardView(discord.ui.View):
             color=discord.Color.blue()
         )
         await interaction.response.send_message(embed=embed, view=AutoroleView(), ephemeral=True)
+
     @discord.ui.button(label="Répondeur de Salon (Auto-Response)", style=discord.ButtonStyle.success, emoji="💬", custom_id="dashboard_autoresponder")
     async def configure_autoresponder(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
@@ -275,6 +299,8 @@ class SetupDashboardView(discord.ui.View):
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, view=AutoresponderChannelView(), ephemeral=True)
+
+
 # --- Système de participation pour les Giveaways ---
 class GiveawayView(discord.ui.View):
     def __init__(self, prize, winners_count):
@@ -282,6 +308,7 @@ class GiveawayView(discord.ui.View):
         self.prize = prize
         self.winners_count = winners_count
         self.participants = set()
+
     @discord.ui.button(label="Rejoindre ! 🎉", style=discord.ButtonStyle.success, custom_id="giveaway_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id in self.participants:
@@ -294,6 +321,8 @@ class GiveawayView(discord.ui.View):
         embed = interaction.message.embeds[0]
         embed.set_footer(text=f"Participants : {len(self.participants)}")
         await interaction.message.edit(embed=embed)
+
+
 # --- Classe principale du Bot ---
 class RulesBot(commands.Bot):
     def __init__(self):
@@ -301,6 +330,7 @@ class RulesBot(commands.Bot):
         intents.message_content = True
         intents.members = True 
         super().__init__(command_prefix="!", intents=intents)
+
     async def setup_hook(self):
         # Ré-enregistrement des vues persistantes pour éviter de les perdre aux reboots
         self.add_view(RulesView())
@@ -310,12 +340,16 @@ class RulesBot(commands.Bot):
         
         # Synchronisation globale des commandes slash
         await self.tree.sync()
+
 bot = RulesBot()
+
+
 # --- Événements du Bot ---
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté avec succès en tant que {bot.user.name}")
     print("Prêt et synchronisé !")
+
 @bot.event
 async def on_member_join(member: discord.Member):
     # Rôle automatique
@@ -330,17 +364,21 @@ async def on_member_join(member: discord.Member):
                 print(f"✅ Autorole : Rôle {role.name} attribué à {member.name} à l'arrivée.")
             except discord.Forbidden:
                 print(f"❌ Autorole : Impossible d'attribuer le rôle {role.name} à {member.name} (permissions insuffisantes).")
+
 @bot.event
 async def on_message(message: discord.Message):
     # Ignorer les messages de bots pour éviter les boucles infinies
     if message.author.bot:
         return
+
     # Vérification du répondeur automatique de salon
     config = load_config()
     guild_id = str(message.guild.id) if message.guild else None
+
     if guild_id and guild_id in config:
         target_channel_id = config[guild_id].get("autoresponder_channel")
         response_msg = config[guild_id].get("autoresponder_message")
+
         # Si le message est dans le salon ciblé
         if target_channel_id and message.channel.id == target_channel_id:
             # 1. Tenter de supprimer la dernière image envoyée par le bot
@@ -351,23 +389,29 @@ async def on_message(message: discord.Message):
                     await old_msg.delete()
                 except Exception:
                     pass # Le message a pu être supprimé manuellement ou n'existe plus
+
             # 2. Envoyer la nouvelle image vouch.png (et le texte si configuré)
             try:
                 file = None
                 if os.path.exists("vouch.png"):
                     file = discord.File("vouch.png")
+
                 # Envoi du message
                 new_msg = await message.channel.send(
                     content=response_msg if response_msg else None,
                     file=file
                 )
+
                 # 3. Enregistrer l'ID de ce nouveau message
                 config[guild_id]["autoresponder_last_msg"] = new_msg.id
                 save_config(config)
             except discord.Forbidden:
                 print(f"❌ Répondeur : Droits d'écriture ou d'envoi de fichiers manquants dans #{message.channel.name}.")
+
     # Important : permet aux commandes slash et classiques de fonctionner
     await bot.process_commands(message)
+
+
 # --- Commandes d'Administration & Configuration ---
 @bot.tree.command(name="setuprules", description="Affiche le panneau de sélection de langue pour les règles.")
 @app_commands.describe(
@@ -399,13 +443,16 @@ async def setuprules(
         "gris": discord.Color.light_grey()
     }
     embed_color = color_map.get(couleur, discord.Color.blue())
+
     embed = discord.Embed(
         title=titre,
         description=description,
         color=embed_color
     )
+
     await interaction.response.send_message("✅ Le panneau des règles a été généré avec succès !", ephemeral=True)
     await interaction.channel.send(embed=embed, view=RulesView())
+
 @bot.tree.command(name="setup", description="Ouvre le panneau général de configuration du serveur MVP.")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
@@ -417,6 +464,8 @@ async def setup(interaction: discord.Interaction):
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
+
+
 # --- Commandes de Modération ---
 @bot.tree.command(name="ban", description="Bannir définitivement un membre du serveur.")
 @app_commands.describe(membre="Le membre à bannir", raison="La raison du bannissement")
@@ -427,6 +476,7 @@ async def ban(interaction: discord.Interaction, membre: discord.Member, raison: 
         await interaction.response.send_message(f"🔨 **{membre.mention}** a été banni.\n**Raison :** {raison}")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour bannir ce membre.", ephemeral=True)
+
 @bot.tree.command(name="kick", description="Expulser temporairement un membre du serveur.")
 @app_commands.describe(membre="Le membre à expulser", raison="La raison de l'expulsion")
 @app_commands.default_permissions(kick_members=True)
@@ -436,6 +486,7 @@ async def kick(interaction: discord.Interaction, membre: discord.Member, raison:
         await interaction.response.send_message(f"👞 **{membre.mention}** a été expulsé.\n**Raison :** {raison}")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour expulser ce membre.", ephemeral=True)
+
 @bot.tree.command(name="mute", description="Mettre un membre en sourdine temporaire (Timeout).")
 @app_commands.describe(membre="Le membre à muter", duree_minutes="Durée de la mise en sourdine en minutes", raison="La raison")
 @app_commands.default_permissions(moderate_members=True)
@@ -446,6 +497,7 @@ async def mute(interaction: discord.Interaction, membre: discord.Member, duree_m
         await interaction.response.send_message(f"🔇 **{membre.mention}** a été mis en sourdine pour **{duree_minutes}** minute(s).\n**Raison :** {raison}")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour appliquer la mise en sourdine.", ephemeral=True)
+
 @bot.tree.command(name="unmute", description="Enlever la sourdine (Timeout) d'un membre.")
 @app_commands.describe(membre="Le membre à démuter", raison="La raison de la fin de sourdine")
 @app_commands.default_permissions(moderate_members=True)
@@ -455,6 +507,7 @@ async def unmute(interaction: discord.Interaction, membre: discord.Member, raiso
         await interaction.response.send_message(f"🔊 **{membre.mention}** n'est plus en sourdine.\n**Raison :** {raison}")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour démuter ce membre.", ephemeral=True)
+
 @bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel.")
 @app_commands.describe(nombre="Nombre de messages à supprimer")
 @app_commands.default_permissions(manage_messages=True)
@@ -464,77 +517,4 @@ async def clear(interaction: discord.Interaction, nombre: int):
         return
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=nombre)
-    await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés !", ephemeral=True)
-# --- Commande d'Animation / Concours ---
-@bot.tree.command(name="giveaway", description="Lancer un concours (giveaway) interactif.")
-@app_commands.describe(duree_minutes="Durée en minutes", lot="Le cadeau à gagner", gagnants="Le nombre de gagnants")
-@app_commands.default_permissions(administrator=True)
-async def giveaway(interaction: discord.Interaction, duree_minutes: int, lot: str, gagnants: int = 1):
-    if duree_minutes < 1:
-        await interaction.response.send_message("❌ La durée minimale est de 1 minute.", ephemeral=True)
-        return
-    embed = discord.Embed(
-        title="🎉 **CONCOURS / GIVEAWAY** 🎉",
-        description=f"🎁 **Lot :** {lot}\n\n"
-                    f"🏆 **Nombre de gagnants :** {gagnants}\n"
-                    f"⏰ **Durée :** {duree_minutes} minute(s)\n\n"
-                    "Cliquez sur le bouton ci-dessous pour vous inscrire !",
-        color=discord.Color.purple()
-    )
-    embed.set_footer(text="Participants : 0")
-    
-    view = GiveawayView(lot, gagnants)
-    await interaction.response.send_message("📢 Le concours a bien été lancé dans ce salon !", ephemeral=True)
-    msg = await interaction.channel.send(embed=embed, view=view)
-    
-    async def end_giveaway():
-        await asyncio.sleep(duree_minutes * 60)
-        
-        participants_list = list(view.participants)
-        if not participants_list:
-            end_embed = discord.Embed(
-                title="🎉 **Giveaway Terminé** 🎉",
-                description=f"🎁 **Lot :** {lot}\n\n"
-                            "❌ Malheureusement, personne n'a participé !",
-                color=discord.Color.red()
-            )
-            await msg.edit(embed=end_embed, view=None)
-            return
-        winners = []
-        actual_winners_count = min(gagnants, len(participants_list))
-        for _ in range(actual_winners_count):
-            winner_id = random.choice(participants_list)
-            participants_list.remove(winner_id)
-            winners.append(f"<@{winner_id}>")
-            
-        winners_mentions = ", ".join(winners)
-        
-        end_embed = discord.Embed(
-            title="🎉 **Giveaway Terminé** 🎉",
-            description=f"🎁 **Lot :** {lot}\n\n"
-                        f"🏆 **Gagnant(s) :** {winners_mentions}",
-            color=discord.Color.green()
-        )
-        await msg.edit(embed=end_embed, view=None)
-        await interaction.channel.send(f"🎉 Félicitations à {winners_mentions} qui remporte(nt) **{lot}** !")
-    bot.loop.create_task(end_giveaway())
-# --- Serveur Web pour Maintien en ligne (Anti-veille Render) ---
-class SimpleWebServer(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html")
-        self.end_headers()
-        self.wfile.write(b"Bot is alive!")
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleWebServer)
-    print(f"ℹ️ Serveur web démarré sur le port {port} pour le maintien en ligne.")
-    server.serve_forever()
-if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN", "VOTRE_TOKEN_ICI")
-    
-    if TOKEN == "VOTRE_TOKEN_ICI":
-        print("❌ Veuillez configurer le TOKEN de votre bot Discord dans bot.py ou via la variable d'environnement DISCORD_TOKEN.")
-    else:
-        threading.Thread(target=run_web_server, daemon=True).start()
-        bot.run(TOKEN)
+    await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont
