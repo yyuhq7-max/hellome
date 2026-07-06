@@ -8,6 +8,9 @@ import datetime
 import random
 import asyncio
 import threading
+import io
+import urllib.parse
+import aiohttp
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 CONFIG_FILE = "config.json"
@@ -421,6 +424,35 @@ class SelfRoleConfigView(discord.ui.View):
 # membre, le bot supprime son précédent message-image puis le renvoie.
 DEFAULT_STICKY_IMAGE_URL = "https://cdn.discordapp.com/emojis/1523827663742042182.png?size=4096"
 
+# Cache mémoire simple {url: bytes} pour éviter de retélécharger l'image à chaque message
+_sticky_image_bytes_cache = {}
+
+
+def _guess_image_filename(url: str) -> str:
+    """Déduit un nom de fichier (avec extension) à partir de l'URL de l'image."""
+    path = urllib.parse.urlparse(url).path
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        ext = ".png"
+    return f"image{ext}"
+
+
+async def get_sticky_image_file(image_url: str):
+    """Télécharge (ou récupère depuis le cache) les octets de l'image et retourne
+    un discord.File prêt à être joint à un message. Un vrai fichier joint s'affiche
+    en GRAND format dans Discord, contrairement à un simple lien ou un embed."""
+    data = _sticky_image_bytes_cache.get(image_url)
+    if data is None:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+        _sticky_image_bytes_cache[image_url] = data
+
+    filename = _guess_image_filename(image_url)
+    return discord.File(io.BytesIO(data), filename=filename)
+
 
 class StickyImageModal(discord.ui.Modal):
     def __init__(self, channel_id: int):
@@ -461,14 +493,15 @@ class StickyImageModal(discord.ui.Modal):
         )
 
         # On envoie immédiatement une première fois l'image pour initialiser le système
-        # (embed avec set_image => l'image s'affiche en grand format, pas en miniature)
+        # (fichier joint téléchargé puis réuploadé => s'affiche en GRAND format,
+        # sans bordure colorée, contrairement à un lien ou à un embed)
         try:
-            preview_embed = discord.Embed(color=discord.Color.blurple())
-            preview_embed.set_image(url=self.image_url.value.strip())
-            new_message = await channel.send(embed=preview_embed)
-            sticky_images[str(self.channel_id)]["last_message_id"] = new_message.id
-            config[guild_id]["sticky_images"] = sticky_images
-            save_config(config)
+            image_file = await get_sticky_image_file(self.image_url.value.strip())
+            if image_file:
+                new_message = await channel.send(file=image_file)
+                sticky_images[str(self.channel_id)]["last_message_id"] = new_message.id
+                config[guild_id]["sticky_images"] = sticky_images
+                save_config(config)
         except discord.Forbidden:
             pass
 
@@ -701,11 +734,13 @@ async def handle_sticky_image(message: discord.Message):
             pass
 
     # Envoi de la nouvelle image en bas du salon
-    # (embed avec set_image => l'image s'affiche en grand format, pas en miniature)
+    # (fichier joint téléchargé puis réuploadé => s'affiche en GRAND format,
+    # sans bordure colorée, contrairement à un lien ou à un embed)
     try:
-        sticky_embed = discord.Embed(color=discord.Color.blurple())
-        sticky_embed.set_image(url=image_url)
-        new_message = await message.channel.send(embed=sticky_embed)
+        image_file = await get_sticky_image_file(image_url)
+        if not image_file:
+            return
+        new_message = await message.channel.send(file=image_file)
     except discord.Forbidden:
         return
 
