@@ -2,8 +2,28 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
+import json
+import datetime
+import random
+import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CONFIG_FILE = "config.json"
+
+# Fonctions pour gérer la configuration persistante du bot (ex: rôle automatique)
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    with open(CONFIG_FILE, "r") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+def save_config(config):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=4)
 
 # Conditions Générales d'Utilisation (CGU) / Terms of Service (TOS) du serveur MVP
 RULES = {
@@ -120,6 +140,7 @@ RULES = {
     )
 }
 
+# --- Composants UI pour la sélection de langue ---
 class LanguageSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -166,24 +187,99 @@ class RulesView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(LanguageSelect())
 
+
+# --- Composants UI pour la configuration de l'Autorole ---
+class RoleSelect(discord.ui.RoleSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Sélectionnez le rôle automatique à attribuer...",
+            min_values=1,
+            max_values=1,
+            custom_id="persistent_autorole_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        
+        config = load_config()
+        guild_id = str(interaction.guild.id)
+        if guild_id not in config:
+            config[guild_id] = {}
+        config[guild_id]["autorole"] = role.id
+        save_config(config)
+        
+        await interaction.response.send_message(
+            f"✅ **Rôle automatique configuré** ! Les nouveaux membres recevront le rôle : **{role.name}**.", 
+            ephemeral=True
+        )
+
+class AutoroleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(RoleSelect())
+
+
+# --- Système de participation pour les Giveaways ---
+class GiveawayView(discord.ui.View):
+    def __init__(self, prize, winners_count):
+        super().__init__(timeout=None)
+        self.prize = prize
+        self.winners_count = winners_count
+        self.participants = set()
+
+    @discord.ui.button(label="Rejoindre ! 🎉", style=discord.ButtonStyle.success, custom_id="giveaway_join")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in self.participants:
+            self.participants.remove(interaction.user.id)
+            await interaction.response.send_message("❌ Vous avez retiré votre participation.", ephemeral=True)
+        else:
+            self.participants.add(interaction.user.id)
+            await interaction.response.send_message("🎉 Votre participation a été enregistrée !", ephemeral=True)
+        
+        embed = interaction.message.embeds[0]
+        embed.set_footer(text=f"Participants : {len(self.participants)}")
+        await interaction.message.edit(embed=embed)
+
+
+# --- Classe principale du Bot ---
 class RulesBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True 
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         self.add_view(RulesView())
+        self.add_view(AutoroleView())
         await self.tree.sync()
 
 bot = RulesBot()
 
+
+# --- Événements du Bot ---
 @bot.event
 async def on_ready():
     print(f"✅ Bot connecté avec succès en tant que {bot.user.name}")
-    print("Prêt à afficher les règles de revente via le menu déroulant !")
+    print("Prêt et synchronisé !")
 
-@bot.tree.command(name="setuprules", description="Configure et affiche le panneau de sélection de langue pour les règles.")
+@bot.event
+async def on_member_join(member: discord.Member):
+    config = load_config()
+    guild_id = str(member.guild.id)
+    if guild_id in config and "autorole" in config[guild_id]:
+        role_id = config[guild_id]["autorole"]
+        role = member.guild.get_role(role_id)
+        if role:
+            try:
+                await member.add_roles(role)
+                print(f"✅ Autorole : Rôle {role.name} attribué à {member.name} à l'arrivée.")
+            except discord.Forbidden:
+                print(f"❌ Autorole : Impossible d'attribuer le rôle {role.name} à {member.name} (permissions insuffisantes).")
+
+
+# --- Commandes d'Administration & Configuration ---
+@bot.tree.command(name="setuprules", description="Affiche le panneau de sélection de langue pour les règles.")
 @app_commands.describe(
     titre="Le titre de l'embed des règles (ex: Conditions d'utilisation)",
     description="La description ou message d'accueil de l'embed",
@@ -223,6 +319,130 @@ async def setuprules(
     await interaction.response.send_message("✅ Le panneau des règles a été généré avec succès !", ephemeral=True)
     await interaction.channel.send(embed=embed, view=RulesView())
 
+@bot.tree.command(name="setup", description="Ouvre le panneau de configuration du rôle automatique (Autorole).")
+@app_commands.default_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="⚙️ Configuration du Rôle Automatique (Autorole)",
+        description="Choisissez dans le menu déroulant ci-dessous le rôle à attribuer automatiquement aux nouveaux membres dès leur arrivée sur le serveur.",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed, view=AutoroleView(), ephemeral=True)
+
+
+# --- Commandes de Modération ---
+@bot.tree.command(name="ban", description="Bannir définitivement un membre du serveur.")
+@app_commands.describe(membre="Le membre à bannir", raison="La raison du bannissement")
+@app_commands.default_permissions(ban_members=True)
+async def ban(interaction: discord.Interaction, membre: discord.Member, raison: str = "Aucune raison fournie"):
+    try:
+        await membre.ban(reason=raison)
+        await interaction.response.send_message(f"🔨 **{membre.mention}** a été banni.\n**Raison :** {raison}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Permissions insuffisantes pour bannir ce membre.", ephemeral=True)
+
+@bot.tree.command(name="kick", description="Expulser temporairement un membre du serveur.")
+@app_commands.describe(membre="Le membre à expulser", raison="La raison de l'expulsion")
+@app_commands.default_permissions(kick_members=True)
+async def kick(interaction: discord.Interaction, membre: discord.Member, raison: str = "Aucune raison fournie"):
+    try:
+        await membre.kick(reason=raison)
+        await interaction.response.send_message(f"👞 **{membre.mention}** a été expulsé.\n**Raison :** {raison}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Permissions insuffisantes pour expulser ce membre.", ephemeral=True)
+
+@bot.tree.command(name="mute", description="Mettre un membre en sourdine temporaire (Timeout).")
+@app_commands.describe(membre="Le membre à muter", duree_minutes="Durée de la mise en sourdine en minutes", raison="La raison")
+@app_commands.default_permissions(moderate_members=True)
+async def mute(interaction: discord.Interaction, membre: discord.Member, duree_minutes: int, raison: str = "Aucune raison fournie"):
+    try:
+        duration = datetime.timedelta(minutes=duree_minutes)
+        await membre.timeout(duration, reason=raison)
+        await interaction.response.send_message(f"🔇 **{membre.mention}** a été mis en sourdine pour **{duree_minutes}** minute(s).\n**Raison :** {raison}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Permissions insuffisantes pour appliquer la mise en sourdine.", ephemeral=True)
+
+@bot.tree.command(name="unmute", description="Enlever la sourdine (Timeout) d'un membre.")
+@app_commands.describe(membre="Le membre à démuter", raison="La raison de la fin de sourdine")
+@app_commands.default_permissions(moderate_members=True)
+async def unmute(interaction: discord.Interaction, membre: discord.Member, raison: str = "Aucune raison fournie"):
+    try:
+        await membre.timeout(None, reason=raison)
+        await interaction.response.send_message(f"🔊 **{membre.mention}** n'est plus en sourdine.\n**Raison :** {raison}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Permissions insuffisantes pour démuter ce membre.", ephemeral=True)
+
+@bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel.")
+@app_commands.describe(nombre="Nombre de messages à supprimer")
+@app_commands.default_permissions(manage_messages=True)
+async def clear(interaction: discord.Interaction, nombre: int):
+    if nombre < 1:
+        await interaction.response.send_message("❌ Veuillez choisir un nombre supérieur à 0.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=nombre)
+    await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés !", ephemeral=True)
+
+
+# --- Commande d'Animation / Concours ---
+@bot.tree.command(name="giveaway", description="Lancer un concours (giveaway) interactif.")
+@app_commands.describe(duree_minutes="Durée en minutes", lot="Le cadeau à gagner", gagnants="Le nombre de gagnants")
+@app_commands.default_permissions(administrator=True)
+async def giveaway(interaction: discord.Interaction, duree_minutes: int, lot: str, gagnants: int = 1):
+    if duree_minutes < 1:
+        await interaction.response.send_message("❌ La durée minimale est de 1 minute.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🎉 **CONCOURS / GIVEAWAY** 🎉",
+        description=f"🎁 **Lot :** {lot}\n\n"
+                    f"🏆 **Nombre de gagnants :** {gagnants}\n"
+                    f"⏰ **Durée :** {duree_minutes} minute(s)\n\n"
+                    "Cliquez sur le bouton ci-dessous pour vous inscrire !",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text="Participants : 0")
+    
+    view = GiveawayView(lot, gagnants)
+    await interaction.response.send_message("📢 Le concours a bien été lancé dans ce salon !", ephemeral=True)
+    msg = await interaction.channel.send(embed=embed, view=view)
+    
+    async def end_giveaway():
+        await asyncio.sleep(duree_minutes * 60)
+        
+        participants_list = list(view.participants)
+        if not participants_list:
+            end_embed = discord.Embed(
+                title="🎉 **Giveaway Terminé** 🎉",
+                description=f"🎁 **Lot :** {lot}\n\n"
+                            "❌ Malheureusement, personne n'a participé !",
+                color=discord.Color.red()
+            )
+            await msg.edit(embed=end_embed, view=None)
+            return
+
+        winners = []
+        actual_winners_count = min(gagnants, len(participants_list))
+        for _ in range(actual_winners_count):
+            winner_id = random.choice(participants_list)
+            participants_list.remove(winner_id)
+            winners.append(f"<@{winner_id}>")
+            
+        winners_mentions = ", ".join(winners)
+        
+        end_embed = discord.Embed(
+            title="🎉 **Giveaway Terminé** 🎉",
+            description=f"🎁 **Lot :** {lot}\n\n"
+                        f"🏆 **Gagnant(s) :** {winners_mentions}",
+            color=discord.Color.green()
+        )
+        await msg.edit(embed=end_embed, view=None)
+        await interaction.channel.send(f"🎉 Félicitations à {winners_mentions} qui remporte(nt) **{lot}** !")
+
+    bot.loop.create_task(end_giveaway())
+
+
+# --- Serveur Web pour Maintien en ligne (Anti-veille Render) ---
 class SimpleWebServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
