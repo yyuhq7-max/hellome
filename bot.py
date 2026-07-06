@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -26,7 +27,7 @@ RULES = {
         "📜 **REGLAS DE REVENTA MVP** 📜\n\n"
         "1. **Respeto y Civilidad**: Sé cortés y respetuoso con todos. No se tolerarán insultos, amenazas ni comportamientos tóxicos.\n"
         "2. **Tratos Legítimos**: Las estafas (scams), la venta de réplicas no declaradas y el comercio de artículos robados están prohibidos y resultarán en un baneo permanente.\n"
-        "3. **Formato de Anuncios**: Debes usar los canales correctos (`#wts` para vender, `#wtb` para comprar, `#wtt` para intercambiar) et seguir la plantilla establecida.\n"
+        "3. **Formato de Anuncios**: Debes usar los canales correctos (`#wts` para vender, `#wtb` para comprar, `#wtt` para intercambiar) et seguir la plantilla établie.\n"
         "4. **No Interferir (Sniping)**: Está prohibido contactar en privado a un miembro que ya esté negociando públicamente con otro vendedor/comprador.\n"
         "5. **Descargo de Responsabilidad**: El equipo de moderación no se hace responsable de ningún inconveniente en las transacciones. Usa un intermediario (Middleman) de confianza si es necesario."
     ),
@@ -57,7 +58,7 @@ class LanguageSelect(discord.ui.Select):
             ),
             discord.SelectOption(
                 label="Español", 
-                description="Leer las reglas del servidor de reventa MVP en Español", 
+                description="Leer las reglas del serveur de revente MVP en Español", 
                 emoji="🇪🇸", 
                 value="es"
             ),
@@ -94,6 +95,7 @@ class RulesBot(commands.Bot):
 
     async def setup_hook(self):
         self.add_view(RulesView())
+        await self.tree.sync()
 
 bot = RulesBot()
 
@@ -102,18 +104,45 @@ async def on_ready():
     print(f"✅ Bot connecté avec succès en tant que {bot.user.name}")
     print("Prêt à afficher les règles de revente via le menu déroulant !")
 
-@bot.command(name="setup_rules")
-@commands.has_permissions(administrator=True)
-async def setup_rules(ctx: commands.Context):
-    """Commande administrateur pour envoyer l'embed de sélection de la langue"""
+@bot.tree.command(name="setuprules", description="Configure et affiche le panneau de sélection de langue pour les règles.")
+@app_commands.describe(
+    titre="Le titre de l'embed des règles (ex: Conditions d'utilisation)",
+    description="La description ou message d'accueil de l'embed",
+    couleur="Couleur de l'embed (options : bleu, vert, rouge, violet, or, gris)"
+)
+@app_commands.choices(couleur=[
+    app_commands.Choice(name="Bleu", value="bleu"),
+    app_commands.Choice(name="Vert", value="vert"),
+    app_commands.Choice(name="Rouge", value="rouge"),
+    app_commands.Choice(name="Violet", value="violet"),
+    app_commands.Choice(name="Or", value="or"),
+    app_commands.Choice(name="Gris", value="gris")
+])
+@app_commands.default_permissions(administrator=True)
+async def setuprules(
+    interaction: discord.Interaction,
+    titre: str = "MVP Terms of Service / Server Rules",
+    description: str = "Please select your preferred language below to read the MVP server rules.\n\nVeuillez sélectionner votre langue ci-dessous pour lire les règles du serveur MVP.",
+    couleur: str = "bleu"
+):
+    color_map = {
+        "bleu": discord.Color.blue(),
+        "vert": discord.Color.green(),
+        "rouge": discord.Color.red(),
+        "violet": discord.Color.purple(),
+        "or": discord.Color.gold(),
+        "gris": discord.Color.light_grey()
+    }
+    embed_color = color_map.get(couleur, discord.Color.blue())
+
     embed = discord.Embed(
-        title="Conditions d'utilisation / Règles du serveur MVP",
-        description="Veuillez sélectionner votre langue ci-dessous pour lire les règles du serveur MVP.\n\n"
-                    "Please select your preferred language below to read the MVP server rules.",
-        color=discord.Color.blue()
+        title=titre,
+        description=description,
+        color=embed_color
     )
-    await ctx.send(embed=embed, view=RulesView())
-    await ctx.message.delete()
+
+    await interaction.response.send_message("✅ Le panneau des règles a été généré avec succès !", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=RulesView())
 
 class SimpleWebServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -129,12 +158,10 @@ def run_web_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # Récupère le token depuis les variables d'environnement (Render) ou utilise la valeur écrite ci-dessous
     TOKEN = os.environ.get("DISCORD_TOKEN", "VOTRE_TOKEN_ICI")
     
     if TOKEN == "VOTRE_TOKEN_ICI":
         print("❌ Veuillez configurer le TOKEN de votre bot Discord dans bot.py ou via la variable d'environnement DISCORD_TOKEN.")
     else:
-        # Lancement du serveur web en arrière-plan pour les hébergeurs (Render, Koyeb, etc.)
         threading.Thread(target=run_web_server, daemon=True).start()
         bot.run(TOKEN)
