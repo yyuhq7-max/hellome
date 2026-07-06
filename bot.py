@@ -1491,7 +1491,98 @@ class GroupPanelsMultiSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.setup_view.data["panel_ids"] = [int(v) for v in self.values]
+        self.setup_view._refresh_field_select()
         await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+# --- Modale de personnalisation du texte affiché pour UN panel donné dans le message regroupé ---
+class GroupFieldModal(discord.ui.Modal):
+    def __init__(self, setup_view: "GroupSetupView", panel_id: int, panel_cfg: dict):
+        super().__init__(title=f"Texte affiché - Panel #{panel_id}")
+        self.setup_view = setup_view
+        self.panel_id = panel_id
+
+        existing = setup_view.data.get("panel_fields", {}).get(str(panel_id), {})
+        default_label = panel_cfg.get("button_label", "Ouvrir un ticket")
+        default_title = existing.get("title") or panel_cfg.get("embed_title") or default_label
+        # Par défaut, on préremplit avec la description déjà configurée sur le panel
+        # individuel (via /setupticket), plutôt qu'une phrase générique.
+        default_desc = (
+            existing.get("description")
+            or panel_cfg.get("embed_description")
+            or f"Appuyez sur **{default_label}** pour ouvrir le ticket correspondant."
+        )
+
+        self.titre = discord.ui.TextInput(
+            label="Titre affiché (ex : une question en gras)",
+            default=default_title,
+            required=True,
+            max_length=256
+        )
+        self.description = discord.ui.TextInput(
+            label="Texte affiché sous le titre",
+            style=discord.TextStyle.paragraph,
+            default=default_desc,
+            required=True,
+            max_length=1024
+        )
+        self.add_item(self.titre)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        panel_fields = self.setup_view.data.setdefault("panel_fields", {})
+        panel_fields[str(self.panel_id)] = {
+            "title": self.titre.value,
+            "description": self.description.value
+        }
+        await interaction.response.edit_message(
+            embed=self.setup_view.build_preview_embed(),
+            view=self.setup_view
+        )
+
+
+# --- Sélecteur permettant de choisir POUR QUEL panel personnaliser le texte affiché ---
+class GroupFieldEditSelect(discord.ui.Select):
+    def __init__(self, setup_view: "GroupSetupView", panels: list, panel_ids: list):
+        self.setup_view = setup_view
+        self.panels = panels
+
+        options = []
+        for pid in panel_ids:
+            p = next((x for x in panels if x.get("id") == pid), None)
+            if not p:
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=f"Panel #{pid} - {p.get('button_label', 'Ouvrir un ticket')}"[:100],
+                    value=str(pid),
+                    emoji=p.get("button_emoji") or "🎫"
+                )
+            )
+
+        disabled = not options
+        if not options:
+            options = [discord.SelectOption(label="Sélectionnez d'abord des panels ci-dessus", value="none")]
+
+        super().__init__(
+            placeholder="✏️ Personnaliser le texte affiché d'un panel...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            disabled=disabled,
+            row=4
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.defer()
+            return
+        panel_id = int(self.values[0])
+        panel_cfg = next((p for p in self.panels if p.get("id") == panel_id), None)
+        if not panel_cfg:
+            await interaction.response.send_message("❌ Ce panel n'existe plus.", ephemeral=True)
+            return
+        await interaction.response.send_modal(GroupFieldModal(self.setup_view, panel_id, panel_cfg))
 
 
 class GroupSetupView(discord.ui.View):
@@ -1500,10 +1591,12 @@ class GroupSetupView(discord.ui.View):
         self.guild_id = guild_id
         self.editing_group_id = group_id
         self.panels = panels
+        self.field_select = None
 
         if group_data:
             self.data = json.loads(json.dumps(group_data))
             self.data.setdefault("panel_ids", [])
+            self.data.setdefault("panel_fields", {})
         else:
             self.data = {
                 "embed_title": "🎫 Support, 24/7",
@@ -1511,15 +1604,27 @@ class GroupSetupView(discord.ui.View):
                 "embed_color": "bleu",
                 "image_url": None,
                 "panel_channel_id": None,
-                "panel_ids": []
+                "panel_ids": [],
+                "panel_fields": {}
             }
 
         self.add_item(GroupPanelChannelSelect(self))
         if panels:
             self.add_item(GroupPanelsMultiSelect(self, panels))
+        self._refresh_field_select()
         self.refresh_buttons()
 
-    def build_preview_embed(self) -> discord.Embed:
+    def _refresh_field_select(self):
+        """Recrée le sélecteur de personnalisation de texte pour qu'il reflète
+        toujours la liste actuelle des panels inclus dans le groupe."""
+        if self.field_select is not None and self.field_select in self.children:
+            self.remove_item(self.field_select)
+        self.field_select = GroupFieldEditSelect(self, self.panels, self.data.get("panel_ids", []))
+        self.add_item(self.field_select)
+
+    def build_public_embed(self) -> discord.Embed:
+        """Construit l'embed exactement tel qu'il sera publié publiquement :
+        bannière/couleur/titre + un champ (titre en gras + texte) par panel inclus."""
         embed = discord.Embed(
             title=self.data["embed_title"],
             description=self.data["embed_description"],
@@ -1528,15 +1633,28 @@ class GroupSetupView(discord.ui.View):
         if self.data.get("image_url"):
             embed.set_image(url=self.data["image_url"])
 
-        included = []
+        panel_fields = self.data.get("panel_fields", {})
         for pid in self.data.get("panel_ids", []):
             p = next((x for x in self.panels if x.get("id") == pid), None)
-            if p:
-                included.append(f"• {p.get('button_emoji') or '🎫'} {p.get('button_label', 'Ouvrir un ticket')} (panel #{pid})")
+            if not p:
+                continue
+            label = p.get("button_label", "Ouvrir un ticket")
+            field_data = panel_fields.get(str(pid), {})
+            title = field_data.get("title") or p.get("embed_title") or label
+            # Par défaut, le texte affiché avant le bouton est la description du panel
+            # telle que configurée dans /setupticket (et non une phrase générique).
+            default_description = p.get("embed_description") or f"Appuyez sur **{label}** pour ouvrir le ticket correspondant."
+            description = field_data.get("description") or default_description
+            embed.add_field(name=title, value=description, inline=False)
+
+        return embed
+
+    def build_preview_embed(self) -> discord.Embed:
+        embed = self.build_public_embed()
 
         status_lines = [
             f"**Salon du panel :** <#{self.data['panel_channel_id']}>" if self.data["panel_channel_id"] else "**Salon du panel :** ❌ non défini",
-            "**Panels inclus :**\n" + ("\n".join(included) if included else "❌ aucun panel sélectionné")
+            f"**Panels sélectionnés :** {len(self.data.get('panel_ids', []))}" if self.data.get("panel_ids") else "**Panels sélectionnés :** ❌ aucun",
         ]
         embed.add_field(name="⚙️ Configuration actuelle", value="\n".join(status_lines), inline=False)
         if self.editing_group_id is not None:
@@ -1569,9 +1687,9 @@ class GroupSetupView(discord.ui.View):
             config[guild_id] = {}
         groups = config[guild_id].get("ticket_group_panels", [])
 
-        embed = self.build_preview_embed()
-        # On retire le champ de statut (uniquement utile dans l'aperçu de configuration)
-        embed.clear_fields()
+        # On publie exactement le rendu final (bannière + un champ par panel), sans le
+        # champ de statut qui n'est utile que pendant la configuration.
+        embed = self.build_public_embed()
 
         if self.editing_group_id is not None:
             group_id = self.editing_group_id
@@ -1679,7 +1797,8 @@ class GroupPanelChooserSelect(discord.ui.Select):
             content=(
                 "**🗂️ Configuration d'un panel regroupé**\n"
                 "1️⃣ Personnalisez l'embed (titre, description, couleur, bannière), "
-                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, puis publiez."
+                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, "
+                "4️⃣ personnalisez le texte affiché pour chaque panel, puis publiez."
             ),
             embed=view.build_preview_embed(),
             view=view
@@ -1913,7 +2032,8 @@ async def setupticketgroup(interaction: discord.Interaction):
             content=(
                 "**🗂️ Configuration d'un panel regroupé**\n"
                 "1️⃣ Personnalisez l'embed (titre, description, couleur, bannière), "
-                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, puis publiez."
+                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, "
+                "4️⃣ personnalisez le texte affiché pour chaque panel, puis publiez."
             ),
             embed=view.build_preview_embed(),
             view=view,
