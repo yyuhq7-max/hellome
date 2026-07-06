@@ -415,6 +415,82 @@ class SelfRoleConfigView(discord.ui.View):
         self.add_item(SelfRoleRoleSelect())
 
 
+# --- Composants UI pour la configuration de l'Image Fixe (Sticky Image) ---
+# Cette fonctionnalité permet de choisir un salon dans lequel une image reste
+# toujours affichée tout en bas : dès qu'un nouveau message est envoyé par un
+# membre, le bot supprime son précédent message-image puis le renvoie.
+DEFAULT_STICKY_IMAGE_URL = "https://cdn.discordapp.com/emojis/1523827663742042182.png?size=4096"
+
+
+class StickyImageModal(discord.ui.Modal):
+    def __init__(self, channel_id: int):
+        super().__init__(title="Configuration de l'Image Fixe")
+        self.channel_id = channel_id
+
+        self.image_url = discord.ui.TextInput(
+            label="URL de l'image à maintenir en bas",
+            placeholder="https://cdn.discordapp.com/emojis/....png",
+            default=DEFAULT_STICKY_IMAGE_URL,
+            required=True,
+            max_length=300
+        )
+        self.add_item(self.image_url)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Le salon sélectionné est introuvable.", ephemeral=True)
+            return
+
+        config = load_config()
+        guild_id = str(interaction.guild.id)
+        if guild_id not in config:
+            config[guild_id] = {}
+        sticky_images = config[guild_id].get("sticky_images", {})
+        sticky_images[str(self.channel_id)] = {
+            "image_url": self.image_url.value.strip(),
+            "last_message_id": None
+        }
+        config[guild_id]["sticky_images"] = sticky_images
+        save_config(config)
+
+        await interaction.response.send_message(
+            f"✅ **Image fixe configurée** pour {channel.mention} ! "
+            "Elle restera désormais tout en bas de ce salon après chaque nouveau message.",
+            ephemeral=True
+        )
+
+        # On envoie immédiatement une première fois l'image pour initialiser le système
+        try:
+            new_message = await channel.send(self.image_url.value.strip())
+            sticky_images[str(self.channel_id)]["last_message_id"] = new_message.id
+            config[guild_id]["sticky_images"] = sticky_images
+            save_config(config)
+        except discord.Forbidden:
+            pass
+
+
+class StickyImageChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Sélectionnez le salon où garder l'image en bas...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            custom_id="persistent_stickyimage_channel_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        await interaction.response.send_modal(StickyImageModal(channel.id))
+
+
+class StickyImageView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(StickyImageChannelSelect())
+
+
 # --- Dashboard de configuration central (/setup) ---
 class SetupDashboardView(discord.ui.View):
     def __init__(self):
@@ -443,6 +519,18 @@ class SetupDashboardView(discord.ui.View):
             color=discord.Color.blurple()
         )
         await interaction.response.send_message(embed=embed, view=SelfRoleConfigView(), ephemeral=True)
+
+    @discord.ui.button(label="Image Fixe (Bas de salon)", style=discord.ButtonStyle.success, emoji="🖼️", custom_id="dashboard_stickyimage")
+    async def configure_stickyimage(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🖼️ Configuration de l'Image Fixe",
+            description="Sélectionnez le salon dans lequel une image doit toujours rester tout en bas.\n\n"
+                        "Dès qu'un membre enverra un nouveau message dans ce salon, le bot supprimera "
+                        "automatiquement son précédent message-image puis le renverra, pour que l'image "
+                        "soit toujours le dernier message du salon.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, view=StickyImageView(), ephemeral=True)
 
 
 # --- Système de participation pour les Giveaways ---
@@ -484,6 +572,7 @@ class RulesBot(commands.Bot):
         self.add_view(AutoroleView())
         self.add_view(SetupDashboardView())
         self.add_view(SelfRoleConfigView())
+        self.add_view(StickyImageView())
 
         # Ré-enregistrement de tous les boutons de rôle déjà configurés
         config = load_config()
@@ -577,11 +666,62 @@ async def on_invite_delete(invite: discord.Invite):
     if guild_cache and invite.code in guild_cache:
         del guild_cache[invite.code]
 
+
+# --- Système d'Image Fixe (Sticky Image) ---
+async def handle_sticky_image(message: discord.Message):
+    """Si le salon du message est configuré comme salon d'image fixe, supprime
+    l'ancien message-image du bot puis renvoie l'image, pour qu'elle reste
+    toujours tout en bas du salon."""
+    if not message.guild:
+        return
+
+    config = load_config()
+    guild_id = str(message.guild.id)
+    sticky_images = config.get(guild_id, {}).get("sticky_images", {})
+    channel_key = str(message.channel.id)
+
+    if channel_key not in sticky_images:
+        return
+
+    entry = sticky_images[channel_key]
+    image_url = entry.get("image_url")
+    if not image_url:
+        return
+
+    # Suppression de l'ancien message-image, s'il existe encore
+    old_message_id = entry.get("last_message_id")
+    if old_message_id:
+        try:
+            old_message = await message.channel.fetch_message(old_message_id)
+            await old_message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    # Envoi de la nouvelle image en bas du salon
+    try:
+        new_message = await message.channel.send(image_url)
+    except discord.Forbidden:
+        return
+
+    entry["last_message_id"] = new_message.id
+    sticky_images[channel_key] = entry
+    config[guild_id]["sticky_images"] = sticky_images
+    save_config(config)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     # Ignorer les messages de bots pour éviter les boucles infinies
+    # (cela inclut les propres messages-image renvoyés par le bot lui-même)
     if message.author.bot:
         return
+
+    # Image Fixe : on gère ceci avant les commandes pour que ça s'applique
+    # à tout message envoyé dans un salon configuré
+    try:
+        await handle_sticky_image(message)
+    except Exception as e:
+        print(f"⚠️ Image Fixe : erreur lors du traitement du message dans #{message.channel} : {e}")
 
     # Important : permet aux commandes slash et classiques de fonctionner
     await bot.process_commands(message)
@@ -715,7 +855,8 @@ async def setup(interaction: discord.Interaction):
         title="⚙️ MVP Server - Configuration Dashboard",
         description="Choisissez la configuration que vous souhaitez ajuster ou activer sur votre serveur : \n\n"
                     "👤 **Rôle Automatique (Autorole)** : Attribuer un rôle par défaut aux arrivants.\n"
-                    "🎭 **Rôle par Bouton (Self-Role)** : Créer un embed avec un bouton entièrement personnalisable (titre, description, couleur, texte et emoji du bouton) permettant aux membres d'obtenir un rôle.",
+                    "🎭 **Rôle par Bouton (Self-Role)** : Créer un embed avec un bouton entièrement personnalisable (titre, description, couleur, texte et emoji du bouton) permettant aux membres d'obtenir un rôle.\n"
+                    "🖼️ **Image Fixe (Bas de salon)** : Garder une image toujours affichée tout en bas d'un salon choisi.",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
