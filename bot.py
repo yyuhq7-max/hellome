@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import json
+import re
 import datetime
 import random
 import asyncio
@@ -488,10 +489,29 @@ class RulesBot(commands.Bot):
                 self.add_view(SelfRoleView(entry["role_id"], entry["label"], entry.get("emoji")))
 
         # Système de tickets : vue générique de fermeture + panels déjà publiés
+
+        # Migration : les anciennes configs stockaient un seul panel sous
+        # "ticket_panel". On les convertit en liste "ticket_panels" (avec un id).
+        migrated = False
+        for guild_id, guild_config in config.items():
+            if "ticket_panel" in guild_config and "ticket_panels" not in guild_config:
+                old_panel = guild_config.pop("ticket_panel")
+                old_panel["id"] = 1
+                old_panel.setdefault("support_role_ids", [])
+                if "support_role_id" in old_panel:
+                    role_id = old_panel.pop("support_role_id")
+                    if role_id:
+                        old_panel["support_role_ids"] = [role_id]
+                old_panel.setdefault("panel_message_id", None)
+                guild_config["ticket_panels"] = [old_panel]
+                migrated = True
+        if migrated:
+            save_config(config)
+
         self.add_view(TicketActionView())
         for guild_id, guild_config in config.items():
-            if "ticket_panel" in guild_config:
-                self.add_view(TicketPanelView(int(guild_id)))
+            for panel in guild_config.get("ticket_panels", []):
+                self.add_view(TicketPanelView(int(guild_id), panel["id"]))
 
         # Synchronisation globale des commandes slash
         await self.tree.sync()
@@ -762,9 +782,16 @@ async def clear(interaction: discord.Interaction, nombre: int):
 
 # ==================== SYSTÈME DE TICKETS ====================
 
-def get_ticket_config(guild_id: str):
+def get_ticket_panels(guild_id: str) -> list:
     config = load_config()
-    return config.get(guild_id, {}).get("ticket_panel")
+    return config.get(guild_id, {}).get("ticket_panels", [])
+
+
+def get_ticket_panel(guild_id: str, panel_id: int):
+    for panel in get_ticket_panels(guild_id):
+        if panel.get("id") == panel_id:
+            return panel
+    return None
 
 
 def get_next_ticket_number(guild_id: str) -> int:
@@ -775,6 +802,16 @@ def get_next_ticket_number(guild_id: str) -> int:
     config[guild_id]["ticket_counter"] = current
     save_config(config)
     return current
+
+
+def slugify_username(name: str) -> str:
+    """Nettoie un pseudo Discord pour en faire un nom de salon valide."""
+    name = name.lower().strip()
+    name = re.sub(r"[^a-z0-9]+", "-", name)
+    name = name.strip("-")
+    if not name:
+        name = "user"
+    return name[:80]
 
 
 # --- Modale de personnalisation de l'embed du panel de ticket ---
@@ -916,7 +953,7 @@ class TicketRequiredQuestionsView(discord.ui.View):
         self.add_item(TicketRequiredQuestionsSelect(setup_view))
 
 
-# --- Sélecteurs de salon / catégorie / rôle support pour le wizard ---
+# --- Sélecteurs de salon / catégorie / rôles support pour le wizard ---
 class TicketPanelChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, setup_view: "TicketSetupView"):
         self.setup_view = setup_view
@@ -950,41 +987,51 @@ class TicketCategorySelect(discord.ui.ChannelSelect):
 
 
 class TicketSupportRoleSelect(discord.ui.RoleSelect):
+    """Sélection MULTIPLE : on peut désormais choisir plusieurs rôles support
+    qui verront tous les tickets créés depuis ce panel."""
     def __init__(self, setup_view: "TicketSetupView"):
         self.setup_view = setup_view
         super().__init__(
-            placeholder="👮 Rôle support (facultatif, voit tous les tickets)...",
+            placeholder="👮 Rôle(s) support (facultatif, voient tous les tickets)...",
             min_values=0,
-            max_values=1,
+            max_values=10,
             row=2
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self.setup_view.data["support_role_id"] = self.values[0].id if self.values else None
+        self.setup_view.data["support_role_ids"] = [role.id for role in self.values]
         await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
 
 
 # --- Vue principale de configuration (/setupticket) ---
 class TicketSetupView(discord.ui.View):
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, panel_data: dict = None, panel_id: int = None):
         super().__init__(timeout=900)
         self.guild_id = guild_id
-        self.data = {
-            "embed_title": "🎫 Support",
-            "embed_description": "Cliquez sur le bouton ci-dessous pour ouvrir un ticket.",
-            "embed_color": "bleu",
-            "button_label": "Ouvrir un ticket",
-            "button_emoji": "🎫",
-            "panel_channel_id": None,
-            "category_id": None,
-            "support_role_id": None,
-            "questions_enabled": False,
-            "questions": []
-        }
+        # panel_id renseigné => on modifie un panel existant plutôt que d'en créer un nouveau
+        self.editing_panel_id = panel_id
+
+        if panel_data:
+            self.data = json.loads(json.dumps(panel_data))  # copie profonde simple
+            self.data.setdefault("support_role_ids", [])
+        else:
+            self.data = {
+                "embed_title": "🎫 Support",
+                "embed_description": "Cliquez sur le bouton ci-dessous pour ouvrir un ticket.",
+                "embed_color": "bleu",
+                "button_label": "Ouvrir un ticket",
+                "button_emoji": "🎫",
+                "panel_channel_id": None,
+                "category_id": None,
+                "support_role_ids": [],
+                "questions_enabled": False,
+                "questions": []
+            }
 
         self.add_item(TicketPanelChannelSelect(self))
         self.add_item(TicketCategorySelect(self))
         self.add_item(TicketSupportRoleSelect(self))
+        self.refresh_buttons()
 
     def build_preview_embed(self) -> discord.Embed:
         embed = discord.Embed(
@@ -992,13 +1039,23 @@ class TicketSetupView(discord.ui.View):
             description=self.data["embed_description"],
             color=parse_color(self.data["embed_color"])
         )
+
+        support_role_ids = self.data.get("support_role_ids", [])
+        if support_role_ids:
+            roles_txt = ", ".join(f"<@&{rid}>" for rid in support_role_ids)
+            support_line = f"**Rôles support :** {roles_txt}"
+        else:
+            support_line = "**Rôles support :** Aucun (staff par défaut)"
+
         status_lines = [
             f"**Salon du panel :** <#{self.data['panel_channel_id']}>" if self.data["panel_channel_id"] else "**Salon du panel :** ❌ non défini",
             f"**Catégorie tickets :** <#{self.data['category_id']}>" if self.data["category_id"] else "**Catégorie tickets :** ❌ non définie",
-            f"**Rôle support :** <@&{self.data['support_role_id']}>" if self.data["support_role_id"] else "**Rôle support :** Aucun (staff par défaut)",
+            support_line,
             f"**Questions préalables :** {'✅ Activées (' + str(len(self.data['questions'])) + ')' if (self.data['questions_enabled'] and self.data['questions']) else '❌ Désactivées'}"
         ]
         embed.add_field(name="⚙️ Configuration actuelle", value="\n".join(status_lines), inline=False)
+        if self.editing_panel_id is not None:
+            embed.set_footer(text=f"✏️ Modification du panel #{self.editing_panel_id}")
         return embed
 
     def refresh_buttons(self):
@@ -1008,6 +1065,8 @@ class TicketSetupView(discord.ui.View):
             if isinstance(item, discord.ui.Button) and item.custom_id == "ticket_setup_toggle_questions":
                 item.label = "❓ Questions : Activées" if self.data["questions_enabled"] else "❓ Questions : Désactivées"
                 item.style = discord.ButtonStyle.success if self.data["questions_enabled"] else discord.ButtonStyle.secondary
+            if isinstance(item, discord.ui.Button) and item.custom_id == "ticket_setup_publish":
+                item.label = "✅ Enregistrer les modifications" if self.editing_panel_id is not None else "✅ Publier le panel"
 
     @discord.ui.button(label="✏️ Personnaliser l'embed", style=discord.ButtonStyle.primary, row=3, custom_id="ticket_setup_edit_embed")
     async def edit_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1041,26 +1100,79 @@ class TicketSetupView(discord.ui.View):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         config = load_config()
         guild_id = str(self.guild_id)
         if guild_id not in config:
             config[guild_id] = {}
-        config[guild_id]["ticket_panel"] = self.data
-        save_config(config)
+        panels = config[guild_id].get("ticket_panels", [])
 
-        channel = interaction.guild.get_channel(self.data["panel_channel_id"])
         embed = discord.Embed(
             title=self.data["embed_title"],
             description=self.data["embed_description"],
             color=parse_color(self.data["embed_color"])
         )
-        panel_view = TicketPanelView(self.guild_id)
-        await channel.send(embed=embed, view=panel_view)
+
+        if self.editing_panel_id is not None:
+            panel_id = self.editing_panel_id
+            existing = next((p for p in panels if p.get("id") == panel_id), None)
+            self.data["id"] = panel_id
+
+            # On enregistre la config avant l'envoi/édition du message pour que
+            # TicketPanelView retrouve bien le bon libellé/emoji de bouton.
+            self.data["panel_message_id"] = existing.get("panel_message_id") if existing else None
+            panels = [self.data if p.get("id") == panel_id else p for p in panels]
+            config[guild_id]["ticket_panels"] = panels
+            save_config(config)
+
+            panel_view = TicketPanelView(self.guild_id, panel_id)
+            edited = False
+            if existing and existing.get("panel_message_id") and existing.get("panel_channel_id"):
+                old_channel = interaction.guild.get_channel(existing["panel_channel_id"])
+                if old_channel:
+                    try:
+                        old_message = await old_channel.fetch_message(existing["panel_message_id"])
+                        await old_message.edit(embed=embed, view=panel_view)
+                        self.data["panel_message_id"] = old_message.id
+                        self.data["panel_channel_id"] = old_channel.id
+                        edited = True
+                    except (discord.NotFound, discord.Forbidden):
+                        edited = False
+
+            if not edited:
+                channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+                new_message = await channel.send(embed=embed, view=panel_view)
+                self.data["panel_message_id"] = new_message.id
+
+            panels = [self.data if p.get("id") == panel_id else p for p in panels]
+            config[guild_id]["ticket_panels"] = panels
+            save_config(config)
+
+            result_channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+            confirmation = f"✅ Le panel #{panel_id} a été mis à jour dans {result_channel.mention} !"
+        else:
+            panel_id = max((p.get("id", 0) for p in panels), default=0) + 1
+            self.data["id"] = panel_id
+            self.data["panel_message_id"] = None
+            panels.append(self.data)
+            config[guild_id]["ticket_panels"] = panels
+            save_config(config)
+
+            channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+            panel_view = TicketPanelView(self.guild_id, panel_id)
+            new_message = await channel.send(embed=embed, view=panel_view)
+            self.data["panel_message_id"] = new_message.id
+            panels = [self.data if p.get("id") == panel_id else p for p in panels]
+            config[guild_id]["ticket_panels"] = panels
+            save_config(config)
+
+            confirmation = f"✅ Le panel de ticket a été publié dans {channel.mention} !"
 
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(
-            content=f"✅ Le panel de ticket a été publié dans {channel.mention} !",
+        await interaction.edit_original_response(
+            content=confirmation,
             embed=None,
             view=self
         )
@@ -1072,11 +1184,68 @@ class TicketSetupView(discord.ui.View):
         await interaction.response.edit_message(content="❌ Configuration annulée.", embed=None, view=self)
 
 
+# --- Sélecteur affiché par /setupticket pour choisir un panel existant ou en créer un nouveau ---
+class TicketPanelChooserSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild, panels: list):
+        self.guild = guild
+        self.panels = panels
+        options = [
+            discord.SelectOption(
+                label="➕ Créer un nouveau panel",
+                value="new",
+                description="Configurer et publier un nouveau panel de tickets",
+                emoji="✨"
+            )
+        ]
+        for p in panels:
+            channel = guild.get_channel(p.get("panel_channel_id")) if p.get("panel_channel_id") else None
+            channel_desc = f"#{channel.name}" if channel else "salon introuvable"
+            options.append(
+                discord.SelectOption(
+                    label=f"Panel #{p.get('id')} - {p.get('embed_title', 'Sans titre')}"[:100],
+                    value=str(p.get("id")),
+                    description=channel_desc[:100],
+                    emoji="🎫"
+                )
+            )
+        super().__init__(
+            placeholder="Choisissez un panel existant à modifier, ou créez-en un nouveau...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "new":
+            view = TicketSetupView(self.guild.id)
+        else:
+            panel_id = int(self.values[0])
+            panel_data = next((p for p in self.panels if p.get("id") == panel_id), None)
+            view = TicketSetupView(self.guild.id, panel_data=panel_data, panel_id=panel_id)
+
+        await interaction.response.edit_message(
+            content=(
+                "**🎫 Configuration du système de tickets**\n"
+                "1️⃣ Personnalisez l'embed, 2️⃣ choisissez le salon et la catégorie, "
+                "3️⃣ activez les questions préalables si besoin, puis publiez."
+            ),
+            embed=view.build_preview_embed(),
+            view=view
+        )
+
+
+class TicketPanelChooserView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, panels: list):
+        super().__init__(timeout=300)
+        self.add_item(TicketPanelChooserSelect(guild, panels))
+
+
 # --- Modale affichée à l'utilisateur qui ouvre un ticket avec questions ---
 class TicketAnswerModal(discord.ui.Modal):
-    def __init__(self, guild_id: int, questions: list):
+    def __init__(self, guild_id: int, panel_id: int, questions: list):
         super().__init__(title="Ouverture de ticket")
         self.guild_id = guild_id
+        self.panel_id = panel_id
         self.inputs = []
         for q in questions[:5]:
             text_input = discord.ui.TextInput(
@@ -1091,47 +1260,46 @@ class TicketAnswerModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         answers = [(label, field.value) for label, field in self.inputs if field.value]
-        await create_ticket_channel(interaction, self.guild_id, answers)
+        await create_ticket_channel(interaction, self.guild_id, self.panel_id, answers)
 
 
 # --- Bouton persistant du panel public ("Ouvrir un ticket") ---
 class TicketPanelButton(discord.ui.Button):
-    def __init__(self, guild_id: int, label: str, emoji: str = None):
+    def __init__(self, guild_id: int, panel_id: int, label: str, emoji: str = None):
         super().__init__(
             label=label,
             style=discord.ButtonStyle.primary,
             emoji=emoji if emoji else "🎫",
-            custom_id=f"ticket_create_{guild_id}"
+            custom_id=f"ticket_create_{guild_id}_{panel_id}"
         )
         self.guild_id = guild_id
+        self.panel_id = panel_id
 
     async def callback(self, interaction: discord.Interaction):
-        cfg = get_ticket_config(str(self.guild_id))
+        cfg = get_ticket_panel(str(self.guild_id), self.panel_id)
         if not cfg:
             await interaction.response.send_message("❌ Le système de tickets n'est plus configuré.", ephemeral=True)
             return
 
         if cfg.get("questions_enabled") and cfg.get("questions"):
-            await interaction.response.send_modal(TicketAnswerModal(self.guild_id, cfg["questions"]))
+            await interaction.response.send_modal(TicketAnswerModal(self.guild_id, self.panel_id, cfg["questions"]))
         else:
             await interaction.response.defer(ephemeral=True)
-            await create_ticket_channel(interaction, self.guild_id, [])
+            await create_ticket_channel(interaction, self.guild_id, self.panel_id, [])
 
 
 class TicketPanelView(discord.ui.View):
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, panel_id: int):
         super().__init__(timeout=None)
-        config = load_config()
-        cfg = config.get(str(guild_id), {}).get("ticket_panel", {})
+        cfg = get_ticket_panel(str(guild_id), panel_id) or {}
         label = cfg.get("button_label", "Ouvrir un ticket")
         emoji = cfg.get("button_emoji", "🎫")
-        self.add_item(TicketPanelButton(guild_id, label, emoji))
+        self.add_item(TicketPanelButton(guild_id, panel_id, label, emoji))
 
 
 # --- Création effective du salon de ticket ---
-async def create_ticket_channel(interaction: discord.Interaction, guild_id: int, answers: list):
-    config = load_config()
-    cfg = config.get(str(guild_id), {}).get("ticket_panel")
+async def create_ticket_channel(interaction: discord.Interaction, guild_id: int, panel_id: int, answers: list):
+    cfg = get_ticket_panel(str(guild_id), panel_id)
     if not cfg:
         await interaction.followup.send("❌ Le système de tickets n'est plus configuré.", ephemeral=True)
         return
@@ -1139,17 +1307,29 @@ async def create_ticket_channel(interaction: discord.Interaction, guild_id: int,
     guild = interaction.guild
     category = guild.get_channel(cfg["category_id"])
     ticket_number = get_next_ticket_number(str(guild_id))
-    channel_name = f"ticket-{ticket_number:04d}"
+
+    # Nom du salon basé sur le pseudo de l'utilisateur : "{user}-delivery"
+    base_name = f"{slugify_username(interaction.user.name)}-delivery"
+    existing_names = {c.name for c in guild.text_channels}
+    channel_name = base_name
+    suffix = 2
+    while channel_name in existing_names:
+        channel_name = f"{base_name}-{suffix}"
+        suffix += 1
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
     }
-    support_role_id = cfg.get("support_role_id")
-    support_role = guild.get_role(support_role_id) if support_role_id else None
-    if support_role:
-        overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    # Plusieurs rôles support peuvent désormais voir le ticket
+    support_roles = []
+    for role_id in cfg.get("support_role_ids", []):
+        role = guild.get_role(role_id)
+        if role:
+            support_roles.append(role)
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     try:
         ticket_channel = await guild.create_text_channel(
@@ -1163,8 +1343,8 @@ async def create_ticket_channel(interaction: discord.Interaction, guild_id: int,
         return
 
     description = f"Bonjour {interaction.user.mention}, un membre du support va vous répondre sous peu."
-    if support_role:
-        description += f"\n{support_role.mention}"
+    if support_roles:
+        description += "\n" + " ".join(role.mention for role in support_roles)
 
     embed = discord.Embed(
         title=f"🎫 Ticket #{ticket_number:04d}",
@@ -1206,20 +1386,42 @@ class TicketActionView(discord.ui.View):
 
 
 # --- Commande /setupticket : ouverture du wizard de configuration ---
-@bot.tree.command(name="setupticket", description="Configurer et publier un panel de création de tickets.")
+# Si des panels existent déjà sur le serveur, on propose de les modifier
+# avant de pouvoir en créer un nouveau.
+@bot.tree.command(name="setupticket", description="Configurer, modifier ou publier un panel de création de tickets.")
 @app_commands.default_permissions(administrator=True)
 async def setupticket(interaction: discord.Interaction):
-    view = TicketSetupView(interaction.guild.id)
-    await interaction.response.send_message(
-        content=(
-            "**🎫 Configuration du système de tickets**\n"
-            "1️⃣ Personnalisez l'embed, 2️⃣ choisissez le salon et la catégorie, "
-            "3️⃣ activez les questions préalables si besoin, puis publiez."
-        ),
-        embed=view.build_preview_embed(),
-        view=view,
-        ephemeral=True
-    )
+    panels = get_ticket_panels(str(interaction.guild.id))
+
+    if panels:
+        lines = []
+        for p in panels:
+            channel = interaction.guild.get_channel(p.get("panel_channel_id")) if p.get("panel_channel_id") else None
+            channel_txt = channel.mention if channel else "❌ salon supprimé"
+            lines.append(f"**Panel #{p.get('id')}** — {p.get('embed_title', 'Sans titre')} ({channel_txt})")
+
+        embed = discord.Embed(
+            title="🎫 Gestion des panels de tickets",
+            description="Ce serveur possède déjà des panels de tickets. Choisissez-en un ci-dessous pour le "
+                        "modifier, ou créez-en un nouveau.",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(name="Panels existants", value="\n".join(lines), inline=False)
+
+        view = TicketPanelChooserView(interaction.guild, panels)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    else:
+        view = TicketSetupView(interaction.guild.id)
+        await interaction.response.send_message(
+            content=(
+                "**🎫 Configuration du système de tickets**\n"
+                "1️⃣ Personnalisez l'embed, 2️⃣ choisissez le salon et la catégorie, "
+                "3️⃣ activez les questions préalables si besoin, puis publiez."
+            ),
+            embed=view.build_preview_embed(),
+            view=view,
+            ephemeral=True
+        )
 
 
 # --- Serveur HTTP minimal pour garder le bot actif sur Render (Web Service) ---
