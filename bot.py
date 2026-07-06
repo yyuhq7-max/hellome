@@ -513,6 +513,11 @@ class RulesBot(commands.Bot):
             for panel in guild_config.get("ticket_panels", []):
                 self.add_view(TicketPanelView(int(guild_id), panel["id"]))
 
+        # Ré-enregistrement des panels regroupés (un seul message avec plusieurs boutons)
+        for guild_id, guild_config in config.items():
+            for group in guild_config.get("ticket_group_panels", []):
+                self.add_view(GroupTicketPanelView(int(guild_id), group["id"]))
+
         # Synchronisation globale des commandes slash
         await self.tree.sync()
 
@@ -1240,6 +1245,325 @@ class TicketPanelChooserView(discord.ui.View):
         self.add_item(TicketPanelChooserSelect(guild, panels))
 
 
+# ==================== PANELS REGROUPÉS (plusieurs boutons dans un même message) ====================
+# Permet de regrouper plusieurs panels de tickets déjà créés avec /setupticket
+# dans un seul message avec une bannière et un bouton par panel (comme la capture d'écran fournie).
+
+def get_ticket_group_panels(guild_id: str) -> list:
+    config = load_config()
+    return config.get(guild_id, {}).get("ticket_group_panels", [])
+
+
+def get_ticket_group_panel(guild_id: str, group_id: int):
+    for group in get_ticket_group_panels(guild_id):
+        if group.get("id") == group_id:
+            return group
+    return None
+
+
+class GroupTicketPanelView(discord.ui.View):
+    """Un seul message avec un bouton par panel de ticket regroupé.
+    Réutilise TicketPanelButton : chaque bouton ouvre exactement le même flux
+    (catégorie, questions, rôles support) que le panel individuel correspondant."""
+    def __init__(self, guild_id: int, group_id: int):
+        super().__init__(timeout=None)
+        cfg = get_ticket_group_panel(str(guild_id), group_id) or {}
+        for panel_id in cfg.get("panel_ids", []):
+            panel_cfg = get_ticket_panel(str(guild_id), panel_id)
+            if not panel_cfg:
+                continue
+            label = panel_cfg.get("button_label", f"Panel {panel_id}")
+            emoji = panel_cfg.get("button_emoji", "🎫")
+            self.add_item(TicketPanelButton(guild_id, panel_id, label, emoji))
+
+
+class GroupEmbedModal(discord.ui.Modal):
+    def __init__(self, setup_view: "GroupSetupView"):
+        super().__init__(title="Personnalisation du Panel Regroupé")
+        self.setup_view = setup_view
+
+        self.titre = discord.ui.TextInput(
+            label="Titre de l'embed",
+            default=setup_view.data["embed_title"],
+            required=True,
+            max_length=100
+        )
+        self.description = discord.ui.TextInput(
+            label="Description de l'embed",
+            style=discord.TextStyle.paragraph,
+            default=setup_view.data["embed_description"],
+            required=False,
+            max_length=1000
+        )
+        self.couleur = discord.ui.TextInput(
+            label="Couleur (nom ou hex, ex: bleu / #5865F2)",
+            default=setup_view.data["embed_color"],
+            required=False,
+            max_length=20
+        )
+        self.image_url = discord.ui.TextInput(
+            label="URL de la bannière (image, facultatif)",
+            default=setup_view.data.get("image_url") or "",
+            required=False,
+            max_length=300
+        )
+        self.add_item(self.titre)
+        self.add_item(self.description)
+        self.add_item(self.couleur)
+        self.add_item(self.image_url)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.setup_view.data["embed_title"] = self.titre.value
+        self.setup_view.data["embed_description"] = self.description.value
+        self.setup_view.data["embed_color"] = self.couleur.value or "bleu"
+        self.setup_view.data["image_url"] = self.image_url.value.strip() or None
+
+        await interaction.response.edit_message(
+            embed=self.setup_view.build_preview_embed(),
+            view=self.setup_view
+        )
+
+
+class GroupPanelChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, setup_view: "GroupSetupView"):
+        self.setup_view = setup_view
+        super().__init__(
+            placeholder="📍 Salon où poster le panel regroupé...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1,
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.data["panel_channel_id"] = self.values[0].id
+        await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+class GroupPanelsMultiSelect(discord.ui.Select):
+    """Sélection des panels de tickets existants à inclure comme boutons dans le message regroupé."""
+    def __init__(self, setup_view: "GroupSetupView", panels: list):
+        self.setup_view = setup_view
+        options = [
+            discord.SelectOption(
+                label=f"Panel #{p.get('id')} - {p.get('embed_title', 'Sans titre')}"[:100],
+                value=str(p.get("id")),
+                emoji=p.get("button_emoji") or "🎫",
+                default=p.get("id") in setup_view.data.get("panel_ids", [])
+            )
+            for p in panels
+        ]
+        super().__init__(
+            placeholder="Choisissez les panels à regrouper dans ce message...",
+            min_values=0,
+            max_values=len(options),
+            options=options,
+            row=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.setup_view.data["panel_ids"] = [int(v) for v in self.values]
+        await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
+
+
+class GroupSetupView(discord.ui.View):
+    def __init__(self, guild_id: int, panels: list, group_data: dict = None, group_id: int = None):
+        super().__init__(timeout=900)
+        self.guild_id = guild_id
+        self.editing_group_id = group_id
+        self.panels = panels
+
+        if group_data:
+            self.data = json.loads(json.dumps(group_data))
+            self.data.setdefault("panel_ids", [])
+        else:
+            self.data = {
+                "embed_title": "🎫 Support, 24/7",
+                "embed_description": "Cliquez sur un bouton ci-dessous pour ouvrir le ticket correspondant.",
+                "embed_color": "bleu",
+                "image_url": None,
+                "panel_channel_id": None,
+                "panel_ids": []
+            }
+
+        self.add_item(GroupPanelChannelSelect(self))
+        if panels:
+            self.add_item(GroupPanelsMultiSelect(self, panels))
+        self.refresh_buttons()
+
+    def build_preview_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=self.data["embed_title"],
+            description=self.data["embed_description"],
+            color=parse_color(self.data["embed_color"])
+        )
+        if self.data.get("image_url"):
+            embed.set_image(url=self.data["image_url"])
+
+        included = []
+        for pid in self.data.get("panel_ids", []):
+            p = next((x for x in self.panels if x.get("id") == pid), None)
+            if p:
+                included.append(f"• {p.get('button_emoji') or '🎫'} {p.get('button_label', 'Ouvrir un ticket')} (panel #{pid})")
+
+        status_lines = [
+            f"**Salon du panel :** <#{self.data['panel_channel_id']}>" if self.data["panel_channel_id"] else "**Salon du panel :** ❌ non défini",
+            "**Panels inclus :**\n" + ("\n".join(included) if included else "❌ aucun panel sélectionné")
+        ]
+        embed.add_field(name="⚙️ Configuration actuelle", value="\n".join(status_lines), inline=False)
+        if self.editing_group_id is not None:
+            embed.set_footer(text=f"✏️ Modification du panel regroupé #{self.editing_group_id}")
+        return embed
+
+    def refresh_buttons(self):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id == "group_setup_publish":
+                item.label = "✅ Enregistrer les modifications" if self.editing_group_id is not None else "✅ Publier le panel"
+
+    @discord.ui.button(label="✏️ Personnaliser l'embed", style=discord.ButtonStyle.primary, row=2, custom_id="group_setup_edit_embed")
+    async def edit_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GroupEmbedModal(self))
+
+    @discord.ui.button(label="✅ Publier le panel", style=discord.ButtonStyle.success, row=3, custom_id="group_setup_publish")
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.data["panel_channel_id"] or not self.data.get("panel_ids"):
+            await interaction.response.send_message(
+                "❌ Vous devez sélectionner un **salon** et au moins **un panel** avant de publier.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        config = load_config()
+        guild_id = str(self.guild_id)
+        if guild_id not in config:
+            config[guild_id] = {}
+        groups = config[guild_id].get("ticket_group_panels", [])
+
+        embed = self.build_preview_embed()
+        # On retire le champ de statut (uniquement utile dans l'aperçu de configuration)
+        embed.clear_fields()
+
+        if self.editing_group_id is not None:
+            group_id = self.editing_group_id
+            existing = next((g for g in groups if g.get("id") == group_id), None)
+            self.data["id"] = group_id
+            self.data["panel_message_id"] = existing.get("panel_message_id") if existing else None
+            groups = [self.data if g.get("id") == group_id else g for g in groups]
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            group_view = GroupTicketPanelView(self.guild_id, group_id)
+            edited = False
+            if existing and existing.get("panel_message_id") and existing.get("panel_channel_id"):
+                old_channel = interaction.guild.get_channel(existing["panel_channel_id"])
+                if old_channel:
+                    try:
+                        old_message = await old_channel.fetch_message(existing["panel_message_id"])
+                        await old_message.edit(embed=embed, view=group_view)
+                        self.data["panel_message_id"] = old_message.id
+                        self.data["panel_channel_id"] = old_channel.id
+                        edited = True
+                    except (discord.NotFound, discord.Forbidden):
+                        edited = False
+
+            if not edited:
+                channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+                new_message = await channel.send(embed=embed, view=group_view)
+                self.data["panel_message_id"] = new_message.id
+
+            groups = [self.data if g.get("id") == group_id else g for g in groups]
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            result_channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+            confirmation = f"✅ Le panel regroupé #{group_id} a été mis à jour dans {result_channel.mention} !"
+        else:
+            group_id = max((g.get("id", 0) for g in groups), default=0) + 1
+            self.data["id"] = group_id
+            self.data["panel_message_id"] = None
+            groups.append(self.data)
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            channel = interaction.guild.get_channel(self.data["panel_channel_id"])
+            group_view = GroupTicketPanelView(self.guild_id, group_id)
+            new_message = await channel.send(embed=embed, view=group_view)
+            self.data["panel_message_id"] = new_message.id
+            groups = [self.data if g.get("id") == group_id else g for g in groups]
+            config[guild_id]["ticket_group_panels"] = groups
+            save_config(config)
+
+            confirmation = f"✅ Le panel regroupé a été publié dans {channel.mention} !"
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.edit_original_response(content=confirmation, embed=None, view=self)
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.danger, row=3, custom_id="group_setup_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Configuration annulée.", embed=None, view=self)
+
+
+class GroupPanelChooserSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild, panels: list, groups: list):
+        self.guild = guild
+        self.panels = panels
+        self.groups = groups
+        options = [
+            discord.SelectOption(
+                label="➕ Créer un nouveau panel regroupé",
+                value="new",
+                description="Configurer et publier un nouveau message multi-boutons",
+                emoji="✨"
+            )
+        ]
+        for g in groups:
+            channel = guild.get_channel(g.get("panel_channel_id")) if g.get("panel_channel_id") else None
+            channel_desc = f"#{channel.name}" if channel else "salon introuvable"
+            options.append(
+                discord.SelectOption(
+                    label=f"Groupe #{g.get('id')} - {g.get('embed_title', 'Sans titre')}"[:100],
+                    value=str(g.get("id")),
+                    description=channel_desc[:100],
+                    emoji="🗂️"
+                )
+            )
+        super().__init__(
+            placeholder="Choisissez un panel regroupé existant à modifier, ou créez-en un nouveau...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "new":
+            view = GroupSetupView(self.guild.id, self.panels)
+        else:
+            group_id = int(self.values[0])
+            group_data = next((g for g in self.groups if g.get("id") == group_id), None)
+            view = GroupSetupView(self.guild.id, self.panels, group_data=group_data, group_id=group_id)
+
+        await interaction.response.edit_message(
+            content=(
+                "**🗂️ Configuration d'un panel regroupé**\n"
+                "1️⃣ Personnalisez l'embed (titre, description, couleur, bannière), "
+                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, puis publiez."
+            ),
+            embed=view.build_preview_embed(),
+            view=view
+        )
+
+
+class GroupPanelChooserView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, panels: list, groups: list):
+        super().__init__(timeout=300)
+        self.add_item(GroupPanelChooserSelect(guild, panels, groups))
+
+
 # --- Modale affichée à l'utilisateur qui ouvre un ticket avec questions ---
 class TicketAnswerModal(discord.ui.Modal):
     def __init__(self, guild_id: int, panel_id: int, questions: list):
@@ -1417,6 +1741,51 @@ async def setupticket(interaction: discord.Interaction):
                 "**🎫 Configuration du système de tickets**\n"
                 "1️⃣ Personnalisez l'embed, 2️⃣ choisissez le salon et la catégorie, "
                 "3️⃣ activez les questions préalables si besoin, puis publiez."
+            ),
+            embed=view.build_preview_embed(),
+            view=view,
+            ephemeral=True
+        )
+
+
+# --- Commande /setupticketgroup : regrouper plusieurs panels existants dans un même message ---
+@bot.tree.command(name="setupticketgroup", description="Regrouper plusieurs panels de tickets dans un seul message avec un bouton par panel.")
+@app_commands.default_permissions(administrator=True)
+async def setupticketgroup(interaction: discord.Interaction):
+    panels = get_ticket_panels(str(interaction.guild.id))
+    if not panels:
+        await interaction.response.send_message(
+            "❌ Vous devez d'abord créer au moins un panel de ticket avec `/setupticket` avant de pouvoir les regrouper.",
+            ephemeral=True
+        )
+        return
+
+    groups = get_ticket_group_panels(str(interaction.guild.id))
+
+    if groups:
+        lines = []
+        for g in groups:
+            channel = interaction.guild.get_channel(g.get("panel_channel_id")) if g.get("panel_channel_id") else None
+            channel_txt = channel.mention if channel else "❌ salon supprimé"
+            lines.append(f"**Groupe #{g.get('id')}** — {g.get('embed_title', 'Sans titre')} ({channel_txt})")
+
+        embed = discord.Embed(
+            title="🗂️ Gestion des panels regroupés",
+            description="Ce serveur possède déjà des panels regroupés. Choisissez-en un ci-dessous pour le "
+                        "modifier, ou créez-en un nouveau.",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(name="Groupes existants", value="\n".join(lines), inline=False)
+
+        view = GroupPanelChooserView(interaction.guild, panels, groups)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    else:
+        view = GroupSetupView(interaction.guild.id, panels)
+        await interaction.response.send_message(
+            content=(
+                "**🗂️ Configuration d'un panel regroupé**\n"
+                "1️⃣ Personnalisez l'embed (titre, description, couleur, bannière), "
+                "2️⃣ choisissez le salon, 3️⃣ sélectionnez les panels de tickets à regrouper, puis publiez."
             ),
             embed=view.build_preview_embed(),
             view=view,
