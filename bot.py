@@ -461,8 +461,11 @@ class StickyImageModal(discord.ui.Modal):
         )
 
         # On envoie immédiatement une première fois l'image pour initialiser le système
+        # (embed avec set_image => l'image s'affiche en grand format, pas en miniature)
         try:
-            new_message = await channel.send(self.image_url.value.strip())
+            preview_embed = discord.Embed(color=discord.Color.blurple())
+            preview_embed.set_image(url=self.image_url.value.strip())
+            new_message = await channel.send(embed=preview_embed)
             sticky_images[str(self.channel_id)]["last_message_id"] = new_message.id
             config[guild_id]["sticky_images"] = sticky_images
             save_config(config)
@@ -698,8 +701,11 @@ async def handle_sticky_image(message: discord.Message):
             pass
 
     # Envoi de la nouvelle image en bas du salon
+    # (embed avec set_image => l'image s'affiche en grand format, pas en miniature)
     try:
-        new_message = await message.channel.send(image_url)
+        sticky_embed = discord.Embed(color=discord.Color.blurple())
+        sticky_embed.set_image(url=image_url)
+        new_message = await message.channel.send(embed=sticky_embed)
     except discord.Forbidden:
         return
 
