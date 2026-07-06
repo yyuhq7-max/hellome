@@ -25,6 +25,25 @@ def save_config(config):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
 
+# Table de couleurs réutilisable pour toutes les commandes à embed
+COLOR_MAP = {
+    "bleu": discord.Color.blue(),
+    "vert": discord.Color.green(),
+    "rouge": discord.Color.red(),
+    "violet": discord.Color.purple(),
+    "or": discord.Color.gold(),
+    "gris": discord.Color.light_grey()
+}
+
+COLOR_CHOICES = [
+    app_commands.Choice(name="Bleu", value="bleu"),
+    app_commands.Choice(name="Vert", value="vert"),
+    app_commands.Choice(name="Rouge", value="rouge"),
+    app_commands.Choice(name="Violet", value="violet"),
+    app_commands.Choice(name="Or", value="or"),
+    app_commands.Choice(name="Gris", value="gris")
+]
+
 # Conditions Générales d'Utilisation (CGU) / Terms of Service (TOS) du serveur MVP
 RULES = {
     "fr": (
@@ -277,6 +296,120 @@ class AutoresponderChannelView(discord.ui.View):
         self.add_item(ChannelSelect())
 
 
+# --- Composants UI pour la configuration du Rôle par Bouton (Self-Role) ---
+class SelfRoleModal(discord.ui.Modal):
+    def __init__(self, role_id: int):
+        super().__init__(title="Configuration du Rôle par Bouton")
+        self.role_id = role_id
+
+        self.embed_titre = discord.ui.TextInput(
+            label="Titre de l'embed (facultatif)",
+            placeholder="Ex : Obtenir le rôle Notifications",
+            required=False,
+            max_length=100
+        )
+        self.embed_texte = discord.ui.TextInput(
+            label="Texte de l'embed (facultatif)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Ex : Cliquez sur le bouton ci-dessous pour obtenir ce rôle.",
+            required=False,
+            max_length=1000
+        )
+        self.bouton_texte = discord.ui.TextInput(
+            label="Texte du bouton",
+            placeholder="Ex : Obtenir le rôle",
+            required=True,
+            max_length=80
+        )
+        self.add_item(self.embed_titre)
+        self.add_item(self.embed_texte)
+        self.add_item(self.bouton_texte)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ Rôle introuvable.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=self.embed_titre.value if self.embed_titre.value else f"🎭 Rôle : {role.name}",
+            description=self.embed_texte.value if self.embed_texte.value else "Cliquez sur le bouton ci-dessous pour obtenir ou retirer ce rôle.",
+            color=discord.Color.blurple()
+        )
+
+        view = SelfRoleView(role.id, self.bouton_texte.value)
+
+        # Sauvegarde de la configuration pour pouvoir ré-enregistrer le bouton après un redémarrage
+        config = load_config()
+        guild_id = str(interaction.guild.id)
+        if guild_id not in config:
+            config[guild_id] = {}
+        selfroles = config[guild_id].get("selfroles", [])
+        # On évite les doublons pour un même rôle
+        selfroles = [entry for entry in selfroles if entry.get("role_id") != role.id]
+        selfroles.append({"role_id": role.id, "label": self.bouton_texte.value})
+        config[guild_id]["selfroles"] = selfroles
+        save_config(config)
+
+        await interaction.response.send_message("✅ Le bouton de rôle automatique a été créé !", ephemeral=True)
+        await interaction.channel.send(embed=embed, view=view)
+
+
+class SelfRoleButton(discord.ui.Button):
+    def __init__(self, role_id: int, label: str):
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.primary,
+            emoji="🎭",
+            custom_id=f"selfrole_{role_id}"
+        )
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message("❌ Ce rôle n'existe plus.", ephemeral=True)
+            return
+
+        member = interaction.user
+        try:
+            if role in member.roles:
+                await member.remove_roles(role)
+                await interaction.response.send_message(f"➖ Le rôle **{role.name}** vous a été retiré.", ephemeral=True)
+            else:
+                await member.add_roles(role)
+                await interaction.response.send_message(f"➕ Le rôle **{role.name}** vous a été attribué.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Permissions insuffisantes pour gérer ce rôle.", ephemeral=True)
+
+
+class SelfRoleView(discord.ui.View):
+    def __init__(self, role_id: int, label: str):
+        super().__init__(timeout=None)
+        self.add_item(SelfRoleButton(role_id, label))
+
+
+class SelfRoleRoleSelect(discord.ui.RoleSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Sélectionnez le rôle à attribuer via le bouton...",
+            min_values=1,
+            max_values=1,
+            custom_id="persistent_selfrole_role_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        # Ouvrir la modale pour personnaliser le texte de l'embed et du bouton
+        await interaction.response.send_modal(SelfRoleModal(role.id))
+
+
+class SelfRoleConfigView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(SelfRoleRoleSelect())
+
+
 # --- Dashboard de configuration central (/setup) ---
 class SetupDashboardView(discord.ui.View):
     def __init__(self):
@@ -299,6 +432,15 @@ class SetupDashboardView(discord.ui.View):
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, view=AutoresponderChannelView(), ephemeral=True)
+
+    @discord.ui.button(label="Rôle par Bouton (Self-Role)", style=discord.ButtonStyle.secondary, emoji="🎭", custom_id="dashboard_selfrole")
+    async def configure_selfrole(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎭 Configuration du Rôle par Bouton",
+            description="Sélectionnez le rôle que les membres pourront obtenir (ou retirer) en cliquant sur un bouton. Vous pourrez ensuite personnaliser le titre, le texte de l'embed et le texte du bouton.",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.send_message(embed=embed, view=SelfRoleConfigView(), ephemeral=True)
 
 
 # --- Système de participation pour les Giveaways ---
@@ -337,6 +479,13 @@ class RulesBot(commands.Bot):
         self.add_view(AutoroleView())
         self.add_view(AutoresponderChannelView())
         self.add_view(SetupDashboardView())
+        self.add_view(SelfRoleConfigView())
+
+        # Ré-enregistrement de tous les boutons de rôle automatique déjà configurés
+        config = load_config()
+        for guild_id, guild_config in config.items():
+            for entry in guild_config.get("selfroles", []):
+                self.add_view(SelfRoleView(entry["role_id"], entry["label"]))
         
         # Synchronisation globale des commandes slash
         await self.tree.sync()
@@ -419,14 +568,7 @@ async def on_message(message: discord.Message):
     description="La description ou message d'accueil de l'embed",
     couleur="Couleur de l'embed (options : bleu, vert, rouge, violet, or, gris)"
 )
-@app_commands.choices(couleur=[
-    app_commands.Choice(name="Bleu", value="bleu"),
-    app_commands.Choice(name="Vert", value="vert"),
-    app_commands.Choice(name="Rouge", value="rouge"),
-    app_commands.Choice(name="Violet", value="violet"),
-    app_commands.Choice(name="Or", value="or"),
-    app_commands.Choice(name="Gris", value="gris")
-])
+@app_commands.choices(couleur=COLOR_CHOICES)
 @app_commands.default_permissions(administrator=True)
 async def setuprules(
     interaction: discord.Interaction,
@@ -434,15 +576,7 @@ async def setuprules(
     description: str = "Please select your preferred language below to read the MVP server rules.\n\nVeuillez sélectionner votre langue ci-dessous pour lire les règles du serveur MVP.",
     couleur: str = "bleu"
 ):
-    color_map = {
-        "bleu": discord.Color.blue(),
-        "vert": discord.Color.green(),
-        "rouge": discord.Color.red(),
-        "violet": discord.Color.purple(),
-        "or": discord.Color.gold(),
-        "gris": discord.Color.light_grey()
-    }
-    embed_color = color_map.get(couleur, discord.Color.blue())
+    embed_color = COLOR_MAP.get(couleur, discord.Color.blue())
 
     embed = discord.Embed(
         title=titre,
@@ -460,10 +594,149 @@ async def setup(interaction: discord.Interaction):
         title="⚙️ MVP Server - Configuration Dashboard",
         description="Choisissez la configuration que vous souhaitez ajuster ou activer sur votre serveur : \n\n"
                     "👤 **Rôle Automatique (Autorole)** : Attribuer un rôle par défaut aux arrivants.\n"
-                    "💬 **Répondeur de Salon** : Envoyer une image automatique et supprimer la précédente à chaque envoi.",
+                    "💬 **Répondeur de Salon** : Envoyer une image automatique et supprimer la précédente à chaque envoi.\n"
+                    "🎭 **Rôle par Bouton (Self-Role)** : Créer un message avec un bouton permettant aux membres de s'attribuer un rôle.",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
+
+
+# --- Commandes de Contenu (Sondage / Annonce / Embed) ---
+@bot.tree.command(name="poll", description="Créer un sondage avec plusieurs options.")
+@app_commands.describe(
+    question="La question du sondage",
+    option1="Option 1",
+    option2="Option 2",
+    option3="Option 3 (facultatif)",
+    option4="Option 4 (facultatif)",
+    option5="Option 5 (facultatif)",
+    couleur="Couleur de l'embed du sondage"
+)
+@app_commands.choices(couleur=COLOR_CHOICES)
+async def poll(
+    interaction: discord.Interaction,
+    question: str,
+    option1: str,
+    option2: str,
+    option3: str = None,
+    option4: str = None,
+    option5: str = None,
+    couleur: str = "bleu"
+):
+    options = [option1, option2]
+    for opt in (option3, option4, option5):
+        if opt:
+            options.append(opt)
+
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    description_lines = [f"{emojis[i]}  {opt}" for i, opt in enumerate(options)]
+
+    embed = discord.Embed(
+        title=f"📊 {question}",
+        description="\n\n".join(description_lines),
+        color=COLOR_MAP.get(couleur, discord.Color.blue())
+    )
+    embed.set_footer(text=f"Sondage lancé par {interaction.user.display_name}")
+    embed.timestamp = datetime.datetime.now()
+
+    await interaction.response.send_message("✅ Sondage créé !", ephemeral=True)
+    poll_msg = await interaction.channel.send(embed=embed)
+    for i in range(len(options)):
+        await poll_msg.add_reaction(emojis[i])
+
+
+@bot.tree.command(name="announce", description="Créer une annonce sous forme d'embed, avec ou sans mention.")
+@app_commands.describe(
+    titre="Titre de l'annonce",
+    description="Contenu de l'annonce",
+    couleur="Couleur de l'embed",
+    mention="Type de mention à ajouter au-dessus de l'annonce",
+    role="Rôle à mentionner si l'option 'Rôle spécifique' est sélectionnée",
+    image_url="URL d'une image à afficher (facultatif)"
+)
+@app_commands.choices(
+    couleur=COLOR_CHOICES,
+    mention=[
+        app_commands.Choice(name="Aucune mention", value="none"),
+        app_commands.Choice(name="@everyone", value="everyone"),
+        app_commands.Choice(name="Rôle spécifique", value="role"),
+    ]
+)
+@app_commands.default_permissions(administrator=True)
+async def announce(
+    interaction: discord.Interaction,
+    titre: str,
+    description: str,
+    couleur: str = "bleu",
+    mention: str = "none",
+    role: discord.Role = None,
+    image_url: str = None
+):
+    if mention == "role" and role is None:
+        await interaction.response.send_message(
+            "❌ Vous devez sélectionner un rôle si vous choisissez l'option 'Rôle spécifique'.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=titre,
+        description=description,
+        color=COLOR_MAP.get(couleur, discord.Color.blue())
+    )
+    embed.set_footer(text=f"Annonce par {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed.timestamp = datetime.datetime.now()
+    if image_url:
+        embed.set_image(url=image_url)
+
+    content = None
+    allowed_mentions = discord.AllowedMentions.none()
+    if mention == "everyone":
+        content = "@everyone"
+        allowed_mentions = discord.AllowedMentions(everyone=True)
+    elif mention == "role":
+        content = role.mention
+        allowed_mentions = discord.AllowedMentions(roles=True)
+
+    await interaction.response.send_message("✅ Annonce publiée !", ephemeral=True)
+    await interaction.channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+
+
+@bot.tree.command(name="embed", description="Créer et envoyer un embed personnalisé.")
+@app_commands.describe(
+    description="Texte principal de l'embed",
+    titre="Titre de l'embed (facultatif)",
+    couleur="Couleur de l'embed",
+    image_url="URL d'une grande image à afficher (facultatif)",
+    thumbnail_url="URL d'une miniature à afficher (facultatif)",
+    footer="Texte du pied de page (facultatif)"
+)
+@app_commands.choices(couleur=COLOR_CHOICES)
+@app_commands.default_permissions(manage_messages=True)
+async def embed_command(
+    interaction: discord.Interaction,
+    description: str,
+    titre: str = None,
+    couleur: str = "bleu",
+    image_url: str = None,
+    thumbnail_url: str = None,
+    footer: str = None
+):
+    custom_embed = discord.Embed(
+        description=description,
+        color=COLOR_MAP.get(couleur, discord.Color.blue())
+    )
+    if titre:
+        custom_embed.title = titre
+    if image_url:
+        custom_embed.set_image(url=image_url)
+    if thumbnail_url:
+        custom_embed.set_thumbnail(url=thumbnail_url)
+    if footer:
+        custom_embed.set_footer(text=footer)
+
+    await interaction.response.send_message("✅ Embed envoyé !", ephemeral=True)
+    await interaction.channel.send(embed=custom_embed)
 
 
 # --- Commandes de Modération ---
@@ -517,4 +790,15 @@ async def clear(interaction: discord.Interaction, nombre: int):
         return
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=nombre)
-    await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont
+    await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés avec succès.")
+
+
+# --- Démarrage du bot ---
+# NOTE : le fichier original fourni était tronqué à ce stade (fin de /clear).
+# Complétez ci-dessous avec vos éventuelles commandes additionnelles, puis lancez le bot
+# avec le token stocké dans une variable d'environnement (ne jamais coder le token en dur).
+if __name__ == "__main__":
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    if not TOKEN:
+        raise RuntimeError("La variable d'environnement DISCORD_TOKEN n'est pas définie.")
+    bot.run(TOKEN)
