@@ -808,15 +808,17 @@ class GiveawayView(discord.ui.View):
 
 
 async def end_giveaway(guild_id: int, giveaway_id: int, forced_winners: list = None):
-    """Tire au sort le(s) gagnant(s) d'un giveaway terminé, met à jour le message
-    public et annonce le(s) gagnant(s) dans le salon. La condition d'invitations
-    est revérifiée au moment du tirage, au cas où un participant aurait perdu
-    des invitations entre-temps.
+    """Tire au sort (ou applique le(s) gagnant(s) prédéfini(s)) pour un giveaway
+    terminé, met à jour le message public et annonce le(s) gagnant(s) dans le salon.
 
-    Si `forced_winners` est fourni (liste d'IDs), ces membres sont déclarés
-    gagnants directement, sans tirage au sort ni vérification de la condition
-    d'invitations (utilisé par la commande /setwinnerg pour définir manuellement
-    le(s) gagnant(s))."""
+    - Si `forced_winners` est explicitement fourni (liste d'IDs), ces membres sont
+      utilisés directement.
+    - Sinon, si le giveaway possède des gagnants prédéfinis via /setwinnerg
+      (clé "forced_winners" enregistrée dans sa configuration), ce sont ceux-là
+      qui sont utilisés automatiquement à la fin du giveaway.
+    - Sinon, un tirage au sort classique est effectué parmi les participants
+      éligibles (la condition d'invitations est revérifiée à ce moment-là, au
+      cas où un participant aurait perdu des invitations entre-temps)."""
     guild_key = str(guild_id)
     config = load_config()
     giveaways = config.get(guild_key, {}).get("giveaways", [])
@@ -824,7 +826,10 @@ async def end_giveaway(guild_id: int, giveaway_id: int, forced_winners: list = N
     if not gw or gw.get("ended"):
         return
 
-    if forced_winners is not None:
+    if forced_winners is None:
+        forced_winners = gw.get("forced_winners")
+
+    if forced_winners:
         winners = forced_winners
     else:
         invite_data = get_invite_data(config, guild_key)
@@ -921,13 +926,20 @@ class SetWinnerGiveawaySelect(discord.ui.Select):
             return
 
         winners_count = gw.get("winners_count", 1)
+        existing_forced = gw.get("forced_winners") or []
+        current_txt = (
+            "\n\n📌 **Gagnant(s) actuellement prévu(s) :** " + " ".join(f"<@{uid}>" for uid in existing_forced)
+            if existing_forced else ""
+        )
         embed = discord.Embed(
             title=f"🏆 Définir le(s) gagnant(s) - Giveaway #{giveaway_id}",
             description=(
                 f"**Prix :** {gw['prize']}\n\n"
                 f"Sélectionnez ci-dessous jusqu'à **{winners_count}** membre(s) qui remporteront ce giveaway.\n\n"
-                "⚠️ La condition d'invitations minimum ne sera **pas** vérifiée : les membres sélectionnés "
-                "gagneront automatiquement, et le giveaway sera immédiatement clôturé."
+                "⚠️ Le giveaway **ne sera pas clôturé maintenant**. Les membres sélectionnés seront simplement "
+                "prévus comme gagnants et seront automatiquement déclarés vainqueurs (sans vérification de la "
+                "condition d'invitations) au moment où le giveaway se terminera normalement."
+                + current_txt
             ),
             color=discord.Color.gold()
         )
@@ -959,18 +971,28 @@ class SetWinnerUserSelect(discord.ui.UserSelect):
 
         await interaction.response.defer(ephemeral=True)
 
-        gw = get_giveaway(str(self.guild_id), self.giveaway_id)
+        config = load_config()
+        guild_key = str(self.guild_id)
+        gw = get_giveaway(guild_key, self.giveaway_id)
         if not gw or gw.get("ended"):
             await interaction.followup.send("❌ Ce giveaway n'existe plus ou est déjà terminé.", ephemeral=True)
             return
 
-        prize = gw["prize"]
-        await end_giveaway(self.guild_id, self.giveaway_id, forced_winners=winners)
+        # On enregistre simplement les gagnants prévus : le giveaway continue de
+        # tourner normalement (les membres peuvent toujours participer/se retirer)
+        # et sera clôturé automatiquement à la date de fin prévue par la tâche de
+        # fond, en utilisant ce(s) gagnant(s) prédéfini(s) au lieu d'un tirage au sort.
+        gw["forced_winners"] = winners
+        giveaways = config.get(guild_key, {}).get("giveaways", [])
+        giveaways = [gw if g.get("id") == self.giveaway_id else g for g in giveaways]
+        config[guild_key]["giveaways"] = giveaways
+        save_config(config)
 
         winners_mentions = " ".join(f"<@{uid}>" for uid in winners)
         await interaction.followup.send(
-            f"✅ Le(s) gagnant(s) du giveaway **{prize}** ont été définis manuellement : {winners_mentions}\n"
-            "Le giveaway a été clôturé et le message public a été mis à jour.",
+            f"✅ Le(s) gagnant(s) du giveaway **{gw['prize']}** ont été prévus : {winners_mentions}\n"
+            "Le giveaway continue normalement et sera automatiquement clôturé à sa date de fin, "
+            "avec ce(s) gagnant(s) prédéfini(s) (sans tirage au sort ni vérification de la condition d'invitations).",
             ephemeral=True
         )
 
@@ -1433,7 +1455,7 @@ async def giveaway(
     save_config(config)
 
 
-@bot.tree.command(name="setwinnerg", description="Définir manuellement le(s) gagnant(s) d'un giveaway en cours.")
+@bot.tree.command(name="setwinnerg", description="Prévoir manuellement le(s) gagnant(s) d'un giveaway en cours, sans le clôturer.")
 @app_commands.default_permissions(manage_guild=True)
 async def setwinnerg(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
@@ -1447,9 +1469,12 @@ async def setwinnerg(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(
-        title="🏆 Définir le gagnant d'un giveaway",
-        description="Sélectionnez ci-dessous le giveaway en cours pour lequel vous souhaitez définir "
-                    "manuellement le(s) gagnant(s). Le giveaway sera immédiatement clôturé après votre choix.",
+        title="🏆 Prévoir le(s) gagnant(s) d'un giveaway",
+        description="Sélectionnez ci-dessous le giveaway en cours pour lequel vous souhaitez prévoir "
+                    "manuellement le(s) gagnant(s).\n\n"
+                    "⚠️ Le giveaway **ne sera pas terminé maintenant** : il continue de tourner normalement "
+                    "jusqu'à sa date de fin. Le(s) membre(s) choisi(s) seront simplement déclarés vainqueurs "
+                    "automatiquement lorsque le giveaway se terminera, à la place d'un tirage au sort.",
         color=discord.Color.gold()
     )
     await interaction.response.send_message(
