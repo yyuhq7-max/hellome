@@ -1284,7 +1284,7 @@ async def track_invite_on_join(member: discord.Member):
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="invituser", description="Affiche le nombre d'invitations d'un membre.")
 @app_commands.describe(membre="Le membre dont vous souhaitez voir les invitations (vous-même par défaut)")
 async def invituser(interaction: discord.Interaction, membre: discord.Member = None):
@@ -1307,7 +1307,7 @@ async def invituser(interaction: discord.Interaction, membre: discord.Member = N
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="invitesleaderboard", description="Affiche le classement des membres ayant le plus invité sur le serveur.")
 async def invitesleaderboard(interaction: discord.Interaction):
     config = load_config()
@@ -1337,7 +1337,7 @@ async def invitesleaderboard(interaction: discord.Interaction):
 
 # --- Commandes d'Administration & Configuration ---
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="setuprules", description="Affiche le panneau de sélection de langue pour les règles.")
 @app_commands.describe(
     titre="Le titre de l'embed des règles (ex: Conditions d'utilisation)",
@@ -1363,7 +1363,7 @@ async def setuprules(
     await interaction.channel.send(embed=embed, view=RulesView())
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="setup", description="Ouvre le panneau général de configuration du serveur MVP.")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
@@ -1381,7 +1381,7 @@ async def setup(interaction: discord.Interaction):
 
 # --- Commandes de Contenu (Sondage / Annonce / Embed / Giveaway) ---
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="poll", description="Créer un sondage avec plusieurs options.")
 @app_commands.describe(
     question="La question du sondage",
@@ -1426,7 +1426,7 @@ async def poll(
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="giveaway", description="Créer un giveaway avec une durée, un nombre de gagnants et une condition de participation.")
 @app_commands.describe(
     prix="Le prix à gagner",
@@ -1494,7 +1494,7 @@ async def giveaway(
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="setwinnerg", description="Prévoir manuellement le(s) gagnant(s) d'un giveaway en cours, sans le clôturer.")
 @app_commands.default_permissions(manage_guild=True)
 async def setwinnerg(interaction: discord.Interaction):
@@ -1525,7 +1525,7 @@ async def setwinnerg(interaction: discord.Interaction):
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="announce", description="Créer une annonce sous forme d'embed, avec ou sans mention.")
 @app_commands.describe(
     titre="Titre de l'annonce",
@@ -1584,7 +1584,7 @@ async def announce(
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="embed", description="Créer et envoyer un embed personnalisé.")
 @app_commands.describe(
     description="Texte principal de l'embed (utilisez \\n pour un retour à la ligne)",
@@ -1655,7 +1655,7 @@ class GlobalAnnounceConfirmView(discord.ui.View):
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="globalannounce", description="Envoie un embed en message privé à tous les membres du serveur.")
 @app_commands.describe(
     titre="Titre de l'annonce",
@@ -1739,7 +1739,7 @@ async def globalannounce(
 
 # --- Commandes de Modération ---
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="ban", description="Bannir définitivement un membre du serveur.")
 @app_commands.describe(membre="Le membre à bannir", raison="La raison du bannissement")
 @app_commands.default_permissions(ban_members=True)
@@ -1751,7 +1751,7 @@ async def ban(interaction: discord.Interaction, membre: discord.Member, raison: 
         await interaction.response.send_message("❌ Permissions insuffisantes pour bannir ce membre.", ephemeral=True)
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="kick", description="Expulser temporairement un membre du serveur.")
 @app_commands.describe(membre="Le membre à expulser", raison="La raison de l'expulsion")
 @app_commands.default_permissions(kick_members=True)
@@ -1763,7 +1763,7 @@ async def kick(interaction: discord.Interaction, membre: discord.Member, raison:
         await interaction.response.send_message("❌ Permissions insuffisantes pour expulser ce membre.", ephemeral=True)
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="mute", description="Mettre un membre en sourdine temporaire (Timeout).")
 @app_commands.describe(membre="Le membre à muter", duree_minutes="Durée de la mise en sourdine en minutes", raison="La raison")
 @app_commands.default_permissions(moderate_members=True)
@@ -1776,7 +1776,7 @@ async def mute(interaction: discord.Interaction, membre: discord.Member, duree_m
         await interaction.response.send_message("❌ Permissions insuffisantes pour appliquer la mise en sourdine.", ephemeral=True)
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="unmute", description="Enlever la sourdine (Timeout) d'un membre.")
 @app_commands.describe(membre="Le membre à démuter", raison="La raison de la fin de sourdine")
 @app_commands.default_permissions(moderate_members=True)
@@ -1820,14 +1820,14 @@ class RepeatMessageConfirmView(discord.ui.View):
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
-@bot.tree.command(name="rappelregles", description="Envoie un message plusieurs fois de suite dans le salon (ex : rappeler les règles).")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@bot.tree.command(name="raid", description="Envoie un message plusieurs fois de suite dans le salon (ex : rappeler les règles).")
 @app_commands.describe(
     message="Le message à envoyer (utilisez \\n pour un retour à la ligne)",
     nombre="Nombre de fois où le message sera envoyé (défaut : 40, max : 100)"
 )
 @app_commands.default_permissions(administrator=True)
-async def rappelregles(
+async def raid(
     interaction: discord.Interaction,
     message: str,
     nombre: app_commands.Range[int, 1, 100] = 40
@@ -1871,7 +1871,7 @@ async def rappelregles(
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel.")
 @app_commands.describe(nombre="Nombre de messages à supprimer")
 @app_commands.default_permissions(manage_messages=True)
@@ -2931,7 +2931,7 @@ class TicketActionView(discord.ui.View):
 # Si des panels existent déjà sur le serveur, on propose de les modifier
 # avant de pouvoir en créer un nouveau.
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="setupticket", description="Configurer, modifier ou publier un panel de création de tickets.")
 @app_commands.default_permissions(administrator=True)
 async def setupticket(interaction: discord.Interaction):
@@ -2970,7 +2970,7 @@ async def setupticket(interaction: discord.Interaction):
 
 # --- Commande /setupticketgroup : regrouper plusieurs panels existants dans un même message ---
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="setupticketgroup", description="Regrouper plusieurs panels de tickets dans un seul message avec un bouton par panel.")
 @app_commands.default_permissions(administrator=True)
 async def setupticketgroup(interaction: discord.Interaction):
@@ -3277,7 +3277,7 @@ class ManageTicketDeleteConfirmView(discord.ui.View):
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="manageticket", description="Modifier ou supprimer un panel de ticket (ou un panel regroupé) existant.")
 @app_commands.default_permissions(administrator=True)
 async def manageticket(interaction: discord.Interaction):
