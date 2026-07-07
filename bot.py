@@ -1787,12 +1787,61 @@ async def unmute(interaction: discord.Interaction, membre: discord.Member, raiso
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour démuter ce membre.", ephemeral=True)
 
-# --- Vue de confirmation avant l'envoi répété d'un message (rappel des règles) ---
-class RepeatMessageConfirmView(discord.ui.View):
-    def __init__(self, requester_id: int):
+# --- Sélection du/des salon(s) cibles pour /raid ---
+class RaidChannelSelect(discord.ui.ChannelSelect):
+    """Sélection MULTIPLE : permet de choisir un ou plusieurs salons dans
+    lesquels le message sera renvoyé le nombre de fois demandé."""
+    def __init__(self, formatted_message: str, nombre: int, requester_id: int):
+        super().__init__(
+            placeholder="📍 Sélectionnez le(s) salon(s) cible(s)...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=25,
+            custom_id="raid_channel_select"
+        )
+        self.formatted_message = formatted_message
+        self.nombre = nombre
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Seule la personne ayant lancé cette commande peut choisir les salons.", ephemeral=True
+            )
+            return
+
+        channels = self.values
+        channels_txt = ", ".join(c.mention for c in channels)
+
+        confirm_embed = discord.Embed(
+            title="⚠️ Confirmation requise",
+            description=(
+                f"Vous êtes sur le point d'envoyer le message ci-dessous **{self.nombre}** fois de suite "
+                f"dans **{len(channels)}** salon(s) : {channels_txt}\n\n"
+                "**Aperçu du message :**\n"
+                f"> {self.formatted_message}"
+            ),
+            color=discord.Color.orange()
+        )
+
+        view = RaidConfirmView(self.requester_id, [c.id for c in channels], self.formatted_message, self.nombre)
+        await interaction.response.edit_message(embed=confirm_embed, view=view)
+
+
+class RaidChannelSelectView(discord.ui.View):
+    def __init__(self, formatted_message: str, nombre: int, requester_id: int):
+        super().__init__(timeout=180)
+        self.add_item(RaidChannelSelect(formatted_message, nombre, requester_id))
+
+
+# --- Vue de confirmation avant l'envoi répété du message dans le(s) salon(s) choisi(s) ---
+class RaidConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int, channel_ids: list, formatted_message: str, nombre: int):
         super().__init__(timeout=60)
         self.requester_id = requester_id
-        self.confirmed = False
+        self.channel_ids = channel_ids
+        self.formatted_message = formatted_message
+        self.nombre = nombre
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.requester_id:
@@ -1802,29 +1851,63 @@ class RepeatMessageConfirmView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="✅ Confirmer et envoyer", style=discord.ButtonStyle.danger, custom_id="repeat_message_confirm")
+    @discord.ui.button(label="✅ Confirmer et envoyer", style=discord.ButtonStyle.danger, custom_id="raid_confirm")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = True
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(content="📨 Envoi en cours, veuillez patienter...", view=self)
+        await interaction.response.edit_message(content="📨 Envoi en cours, veuillez patienter...", embed=None, view=self)
         self.stop()
 
-    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="repeat_message_cancel")
+        guild = interaction.guild
+        results = []  # liste de tuples (channel_ou_id, sent_count)
+
+        for channel_id in self.channel_ids:
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                results.append((channel_id, 0))
+                continue
+
+            sent = 0
+            for _ in range(self.nombre):
+                try:
+                    await channel.send(self.formatted_message)
+                    sent += 1
+                except discord.Forbidden:
+                    break
+                except discord.HTTPException:
+                    pass
+                # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
+                await asyncio.sleep(1)
+            results.append((channel, sent))
+
+        lines = []
+        for channel, sent in results:
+            if isinstance(channel, discord.abc.GuildChannel):
+                lines.append(f"{channel.mention} : **{sent}/{self.nombre}**")
+            else:
+                lines.append(f"❌ Salon introuvable (`{channel}`) : 0/{self.nombre}")
+
+        result_embed = discord.Embed(
+            title="✅ Envoi terminé",
+            description="\n".join(lines),
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=result_embed, ephemeral=True)
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="raid_cancel")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = False
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(content="❌ Envoi annulé.", view=self)
+        await interaction.response.edit_message(content="❌ Envoi annulé.", embed=None, view=self)
         self.stop()
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="raid", description="Envoie un message plusieurs fois de suite dans le salon (ex : rappeler les règles).")
+@bot.tree.command(name="raid", description="Envoie un message plusieurs fois de suite dans un ou plusieurs salons (ex : rappeler les règles).")
 @app_commands.describe(
     message="Le message à envoyer (utilisez \\n pour un retour à la ligne)",
-    nombre="Nombre de fois où le message sera envoyé (défaut : 40, max : 100)"
+    nombre="Nombre de fois où le message sera envoyé, par salon (défaut : 40, max : 100)"
 )
 @app_commands.default_permissions(administrator=True)
 async def raid(
@@ -1834,40 +1917,19 @@ async def raid(
 ):
     formatted_message = parse_multiline(message)
 
-    confirm_embed = discord.Embed(
-        title="⚠️ Confirmation requise",
+    embed = discord.Embed(
+        title="📍 Sélection du/des salon(s)",
         description=(
-            f"Vous êtes sur le point d'envoyer le message ci-dessous **{nombre}** fois de suite "
-            f"dans {interaction.channel.mention}.\n\n"
+            f"Choisissez ci-dessous le ou les salons dans lesquels le message sera envoyé **{nombre}** fois de suite, "
+            "puis confirmez l'envoi.\n\n"
             "**Aperçu du message :**\n"
             f"> {formatted_message}"
         ),
-        color=discord.Color.orange()
+        color=discord.Color.blurple()
     )
 
-    view = RepeatMessageConfirmView(interaction.user.id)
-    await interaction.response.send_message(embed=confirm_embed, view=view, ephemeral=True)
-    await view.wait()
-
-    if not view.confirmed:
-        return
-
-    sent = 0
-    for _ in range(nombre):
-        try:
-            await interaction.channel.send(formatted_message)
-            sent += 1
-        except discord.Forbidden:
-            break
-        except discord.HTTPException:
-            pass
-        # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
-        await asyncio.sleep(1)
-
-    await interaction.followup.send(
-        f"✅ Le message a été envoyé **{sent}/{nombre}** fois dans {interaction.channel.mention}.",
-        ephemeral=True
-    )
+    view = RaidChannelSelectView(formatted_message, nombre, interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @app_commands.allowed_installs(guilds=True, users=True)
