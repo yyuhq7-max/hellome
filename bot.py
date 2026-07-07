@@ -2050,6 +2050,122 @@ async def clear(interaction: discord.Interaction, nombre: int):
     await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés avec succès.")
 
 
+# --- Vue de confirmation avant la réinitialisation complète de tous les salons ---
+class GlobalClearConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Seule la personne ayant lancé cette commande peut la confirmer.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Confirmer et tout réinitialiser", style=discord.ButtonStyle.danger, custom_id="globalclear_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content="🧹 Réinitialisation en cours, veuillez patienter... Cette opération peut prendre du temps.",
+            embed=None,
+            view=self
+        )
+        self.stop()
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="globalclear_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = False
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Réinitialisation annulée.", embed=None, view=self)
+        self.stop()
+
+
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@bot.tree.command(name="globalclear", description="⚠️ Réinitialise à 100% TOUS les salons textuels du serveur (efface tout l'historique, y compris les anciens messages).")
+@app_commands.default_permissions(administrator=True)
+async def globalclear(interaction: discord.Interaction):
+    text_channels = interaction.guild.text_channels
+    count = len(text_channels)
+
+    if count == 0:
+        await interaction.response.send_message("❌ Aucun salon textuel trouvé sur ce serveur.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="⚠️ Confirmation requise - Action irréversible",
+        description=(
+            f"Vous êtes sur le point de **réinitialiser à 100%** les **{count}** salon(s) textuel(s) de ce serveur.\n\n"
+            "Concrètement, chaque salon sera **recréé à l'identique** (même nom, position, catégorie, permissions, "
+            "sujet, ralentissement...) mais **totalement vide** : tout l'historique de messages sera définitivement "
+            "perdu, y compris les messages de plus de 14 jours que Discord ne permet pas de supprimer en masse "
+            "autrement.\n\n"
+            "🖼️ Les salons configurés en **Image Fixe** seront automatiquement migrés vers leur nouveau salon.\n"
+            "🎫 En revanche, les **panels de tickets** (individuels ou regroupés) publiés dans un salon réinitialisé "
+            "devront être republiés manuellement via `/setupticket` ou `/setupticketgroup` après l'opération, car "
+            "leur message sera supprimé avec l'ancien salon.\n\n"
+            "❌ **Cette action est irréversible.**"
+        ),
+        color=discord.Color.red()
+    )
+
+    view = GlobalClearConfirmView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    config = load_config()
+    guild_id = str(interaction.guild.id)
+    sticky_images = config.get(guild_id, {}).get("sticky_images", {})
+
+    success = 0
+    failed = []
+
+    for channel in text_channels:
+        try:
+            new_channel = await channel.clone(reason=f"/globalclear exécuté par {interaction.user}")
+            try:
+                await new_channel.edit(position=channel.position)
+            except discord.HTTPException:
+                pass
+
+            # Migration de la configuration d'Image Fixe vers le nouveau salon
+            old_key = str(channel.id)
+            if old_key in sticky_images:
+                entry = sticky_images.pop(old_key)
+                entry["last_message_id"] = None
+                sticky_images[str(new_channel.id)] = entry
+
+            await channel.delete(reason=f"/globalclear exécuté par {interaction.user}")
+            success += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed.append(channel.name)
+        # Petite pause pour rester sous les limites de taux de Discord
+        await asyncio.sleep(1)
+
+    if guild_id in config:
+        config[guild_id]["sticky_images"] = sticky_images
+        save_config(config)
+
+    result_embed = discord.Embed(
+        title="✅ Réinitialisation terminée",
+        description=(
+            f"**{success}/{count}** salon(s) ont été réinitialisés avec succès."
+            + (f"\n\n❌ Échec pour : {', '.join(failed)}" if failed else "")
+        ),
+        color=discord.Color.green() if not failed else discord.Color.gold()
+    )
+    await interaction.followup.send(embed=result_embed, ephemeral=True)
+
+
 # ==================== SYSTÈME DE TICKETS ====================
 
 def get_ticket_panels(guild_id: str) -> list:
