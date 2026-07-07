@@ -1865,33 +1865,40 @@ class RaidConfirmView(discord.ui.View):
         self.stop()
 
         guild = interaction.guild
-        results = []  # liste de tuples (channel_ou_id, sent_count)
 
+        # On résout d'abord tous les salons valides
+        resolved_channels = []  # liste de tuples (channel_id, channel_ou_None)
         for channel_id in self.channel_ids:
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                results.append((channel_id, 0))
-                continue
+            resolved_channels.append((channel_id, guild.get_channel(channel_id)))
 
-            sent = 0
-            for _ in range(self.nombre):
-                try:
-                    await channel.send(self.formatted_message)
-                    sent += 1
-                except discord.Forbidden:
-                    break
-                except discord.HTTPException:
-                    pass
-                # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
-                await asyncio.sleep(1)
-            results.append((channel, sent))
+        # Compteurs et drapeaux d'arrêt (ex: permissions insuffisantes) par salon
+        sent_counts = {channel_id: 0 for channel_id, _ in resolved_channels}
+        stopped = {channel_id: (channel is None) for channel_id, channel in resolved_channels}
+
+        async def send_one(channel_id: int, channel):
+            if channel is None or stopped[channel_id]:
+                return
+            try:
+                await channel.send(self.formatted_message)
+                sent_counts[channel_id] += 1
+            except discord.Forbidden:
+                stopped[channel_id] = True
+            except discord.HTTPException:
+                pass
+
+        # Envoi simultané dans tous les salons à chaque "tour" (au lieu de
+        # salon par salon à la suite), avec un délai réduit de 0.5 seconde
+        # entre chaque tour.
+        for _ in range(self.nombre):
+            await asyncio.gather(*(send_one(cid, ch) for cid, ch in resolved_channels))
+            await asyncio.sleep(0.5)
 
         lines = []
-        for channel, sent in results:
-            if isinstance(channel, discord.abc.GuildChannel):
-                lines.append(f"{channel.mention} : **{sent}/{self.nombre}**")
+        for channel_id, channel in resolved_channels:
+            if channel is not None:
+                lines.append(f"{channel.mention} : **{sent_counts[channel_id]}/{self.nombre}**")
             else:
-                lines.append(f"❌ Salon introuvable (`{channel}`) : 0/{self.nombre}")
+                lines.append(f"❌ Salon introuvable (`{channel_id}`) : 0/{self.nombre}")
 
         result_embed = discord.Embed(
             title="✅ Envoi terminé",
@@ -1942,7 +1949,7 @@ class RaidDMConfirmView(discord.ui.View):
             except discord.HTTPException:
                 pass
             # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
         result_embed = discord.Embed(
             title="✅ Envoi terminé",
