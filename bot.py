@@ -1030,15 +1030,21 @@ async def before_giveaway_checker():
     await bot.wait_until_ready()
 
 
+# --- Commandes autorisées en message privé (voir GuildOnlyCommandTree ci-dessous) ---
+DM_ALLOWED_COMMANDS = {"clear", "poll", "raid"}
+
+
 # --- Arbre de commandes personnalisé : bloque proprement les commandes hors serveur ---
-# Toutes les commandes de ce bot (rôles, salons, membres, tickets, giveaways, etc.)
-# nécessitent un serveur pour fonctionner. Si jamais l'installation utilisateur
-# ("User Install") est activée sur le portail développeur Discord, cette vérification
-# empêche un plantage en répondant simplement que la commande doit être utilisée
-# dans un serveur, plutôt que de lever une erreur (interaction.guild serait None).
+# Toutes les commandes de ce bot nécessitent normalement un serveur pour fonctionner
+# (rôles, salons, membres, tickets, giveaways, etc.). Certaines commandes (voir
+# DM_ALLOWED_COMMANDS ci-dessus) sont toutefois adaptées pour fonctionner directement
+# en message privé, et sont donc explicitement autorisées ici.
 class GuildOnlyCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
+            command_name = interaction.command.name if interaction.command else None
+            if command_name in DM_ALLOWED_COMMANDS:
+                return True
             await interaction.response.send_message(
                 "❌ Cette commande doit être utilisée directement dans un serveur, pas en message privé.",
                 ephemeral=True
@@ -1902,6 +1908,57 @@ class RaidConfirmView(discord.ui.View):
         self.stop()
 
 
+# --- Vue de confirmation pour /raid utilisé en message privé (un seul salon possible : la conversation elle-même) ---
+class RaidDMConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int, formatted_message: str, nombre: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.formatted_message = formatted_message
+        self.nombre = nombre
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Seule la personne ayant lancé cette commande peut la confirmer.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Confirmer et envoyer", style=discord.ButtonStyle.danger, custom_id="raid_dm_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="📨 Envoi en cours, veuillez patienter...", embed=None, view=self)
+        self.stop()
+
+        channel = interaction.channel
+        sent = 0
+        for _ in range(self.nombre):
+            try:
+                await channel.send(self.formatted_message)
+                sent += 1
+            except discord.Forbidden:
+                break
+            except discord.HTTPException:
+                pass
+            # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
+            await asyncio.sleep(1)
+
+        result_embed = discord.Embed(
+            title="✅ Envoi terminé",
+            description=f"**{sent}/{self.nombre}** message(s) envoyé(s) dans cette conversation privée.",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=result_embed, ephemeral=True)
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="raid_dm_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Envoi annulé.", embed=None, view=self)
+        self.stop()
+
+
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @bot.tree.command(name="raid", description="Envoie un message plusieurs fois de suite dans un ou plusieurs salons (ex : rappeler les règles).")
@@ -1916,6 +1973,24 @@ async def raid(
     nombre: app_commands.Range[int, 1, 100] = 40
 ):
     formatted_message = parse_multiline(message)
+
+    # En message privé, il n'y a qu'un seul "salon" possible : la conversation
+    # elle-même. On saute donc la sélection de salon et on demande directement
+    # confirmation avant d'envoyer le message en boucle dans cette conversation.
+    if interaction.guild is None:
+        embed = discord.Embed(
+            title="⚠️ Confirmation requise",
+            description=(
+                f"Vous êtes sur le point d'envoyer le message ci-dessous **{nombre}** fois de suite "
+                "dans cette conversation privée.\n\n"
+                "**Aperçu du message :**\n"
+                f"> {formatted_message}"
+            ),
+            color=discord.Color.orange()
+        )
+        view = RaidDMConfirmView(interaction.user.id, formatted_message, nombre)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        return
 
     embed = discord.Embed(
         title="📍 Sélection du/des salon(s)",
@@ -1934,14 +2009,36 @@ async def raid(
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel.")
+@bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel (ou vos messages en MP).")
 @app_commands.describe(nombre="Nombre de messages à supprimer")
 @app_commands.default_permissions(manage_messages=True)
 async def clear(interaction: discord.Interaction, nombre: int):
     if nombre < 1:
         await interaction.response.send_message("❌ Veuillez choisir un nombre supérieur à 0.", ephemeral=True)
         return
+
     await interaction.response.defer(ephemeral=True)
+
+    # En message privé, Discord ne permet de supprimer que les messages envoyés
+    # par le bot lui-même (impossible de supprimer les messages de l'utilisateur
+    # depuis un bot). On nettoie donc uniquement l'historique des messages du bot.
+    if interaction.guild is None:
+        deleted = 0
+        async for msg in interaction.channel.history(limit=max(200, nombre * 10)):
+            if deleted >= nombre:
+                break
+            if msg.author.id == bot.user.id:
+                try:
+                    await msg.delete()
+                    deleted += 1
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+        await interaction.followup.send(
+            f"🧹 **{deleted}** message(s) du bot ont été supprimés dans cette conversation privée.\n"
+            "ℹ️ En message privé, seuls les messages envoyés par le bot peuvent être supprimés."
+        )
+        return
+
     deleted = await interaction.channel.purge(limit=nombre)
     await interaction.followup.send(f"🧹 **{len(deleted)}** messages ont été supprimés avec succès.")
 
