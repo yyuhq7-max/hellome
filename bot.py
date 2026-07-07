@@ -1742,6 +1742,87 @@ async def unmute(interaction: discord.Interaction, membre: discord.Member, raiso
     except discord.Forbidden:
         await interaction.response.send_message("❌ Permissions insuffisantes pour démuter ce membre.", ephemeral=True)
 
+# --- Vue de confirmation avant l'envoi répété d'un message (rappel des règles) ---
+class RepeatMessageConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "❌ Seule la personne ayant lancé cette commande peut la confirmer.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="✅ Confirmer et envoyer", style=discord.ButtonStyle.danger, custom_id="repeat_message_confirm")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="📨 Envoi en cours, veuillez patienter...", view=self)
+        self.stop()
+
+    @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.secondary, custom_id="repeat_message_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = False
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Envoi annulé.", view=self)
+        self.stop()
+
+
+@bot.tree.command(name="rappelregles", description="Envoie un message plusieurs fois de suite dans le salon (ex : rappeler les règles).")
+@app_commands.describe(
+    message="Le message à envoyer (utilisez \\n pour un retour à la ligne)",
+    nombre="Nombre de fois où le message sera envoyé (défaut : 40, max : 100)"
+)
+@app_commands.default_permissions(administrator=True)
+async def rappelregles(
+    interaction: discord.Interaction,
+    message: str,
+    nombre: app_commands.Range[int, 1, 100] = 40
+):
+    formatted_message = parse_multiline(message)
+
+    confirm_embed = discord.Embed(
+        title="⚠️ Confirmation requise",
+        description=(
+            f"Vous êtes sur le point d'envoyer le message ci-dessous **{nombre}** fois de suite "
+            f"dans {interaction.channel.mention}.\n\n"
+            "**Aperçu du message :**\n"
+            f"> {formatted_message}"
+        ),
+        color=discord.Color.orange()
+    )
+
+    view = RepeatMessageConfirmView(interaction.user.id)
+    await interaction.response.send_message(embed=confirm_embed, view=view, ephemeral=True)
+    await view.wait()
+
+    if not view.confirmed:
+        return
+
+    sent = 0
+    for _ in range(nombre):
+        try:
+            await interaction.channel.send(formatted_message)
+            sent += 1
+        except discord.Forbidden:
+            break
+        except discord.HTTPException:
+            pass
+        # Petite pause pour rester sous les limites de taux de Discord sur les envois répétés
+        await asyncio.sleep(1)
+
+    await interaction.followup.send(
+        f"✅ Le message a été envoyé **{sent}/{nombre}** fois dans {interaction.channel.mention}.",
+        ephemeral=True
+    )
+
+
 @bot.tree.command(name="clear", description="Supprime un nombre défini de messages dans le salon actuel.")
 @app_commands.describe(nombre="Nombre de messages à supprimer")
 @app_commands.default_permissions(manage_messages=True)
