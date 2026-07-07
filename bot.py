@@ -84,6 +84,15 @@ def parse_emoji(value: str):
     return None
 
 
+def parse_multiline(value: str) -> str:
+    """Convertit les séquences '\\n' tapées littéralement par l'utilisateur
+    (les champs de commande slash simples ne supportent pas les vrais retours
+    à la ligne) en véritables sauts de ligne. Supporte aussi '\\r\\n'."""
+    if not value:
+        return value
+    return value.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
 # Conditions Générales d'Utilisation (CGU) / Terms of Service (TOS) du serveur MVP
 RULES = {
     "fr": (
@@ -1487,7 +1496,7 @@ async def setwinnerg(interaction: discord.Interaction):
 @bot.tree.command(name="announce", description="Créer une annonce sous forme d'embed, avec ou sans mention.")
 @app_commands.describe(
     titre="Titre de l'annonce",
-    description="Contenu de l'annonce",
+    description="Contenu de l'annonce (utilisez \\n pour un retour à la ligne)",
     couleur="Couleur de l'embed",
     mention="Type de mention à ajouter au-dessus de l'annonce",
     role="Rôle à mentionner si l'option 'Rôle spécifique' est sélectionnée",
@@ -1520,7 +1529,7 @@ async def announce(
 
     embed = discord.Embed(
         title=titre,
-        description=description,
+        description=parse_multiline(description),
         color=COLOR_MAP.get(couleur, discord.Color.blue())
     )
     embed.set_footer(text=f"Annonce par {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
@@ -1543,7 +1552,7 @@ async def announce(
 
 @bot.tree.command(name="embed", description="Créer et envoyer un embed personnalisé.")
 @app_commands.describe(
-    description="Texte principal de l'embed",
+    description="Texte principal de l'embed (utilisez \\n pour un retour à la ligne)",
     titre="Titre de l'embed (facultatif)",
     couleur="Couleur de l'embed",
     image_url="URL d'une grande image à afficher (facultatif)",
@@ -1562,17 +1571,17 @@ async def embed_command(
     footer: str = None
 ):
     custom_embed = discord.Embed(
-        description=description,
+        description=parse_multiline(description),
         color=COLOR_MAP.get(couleur, discord.Color.blue())
     )
     if titre:
-        custom_embed.title = titre
+        custom_embed.title = parse_multiline(titre)
     if image_url:
         custom_embed.set_image(url=image_url)
     if thumbnail_url:
         custom_embed.set_thumbnail(url=thumbnail_url)
     if footer:
-        custom_embed.set_footer(text=footer)
+        custom_embed.set_footer(text=parse_multiline(footer))
 
     await interaction.response.send_message("✅ Embed envoyé !", ephemeral=True)
     await interaction.channel.send(embed=custom_embed)
@@ -1613,7 +1622,7 @@ class GlobalAnnounceConfirmView(discord.ui.View):
 @bot.tree.command(name="globalannounce", description="Envoie un embed en message privé à tous les membres du serveur.")
 @app_commands.describe(
     titre="Titre de l'annonce",
-    description="Contenu de l'annonce",
+    description="Contenu de l'annonce (utilisez \\n pour un retour à la ligne)",
     couleur="Couleur de l'embed",
     image_url="URL d'une image à afficher (facultatif)",
     inclure_bots="Envoyer également aux comptes bots (non, par défaut)"
@@ -1630,7 +1639,7 @@ async def globalannounce(
 ):
     embed = discord.Embed(
         title=titre,
-        description=description,
+        description=parse_multiline(description),
         color=COLOR_MAP.get(couleur, discord.Color.blue())
     )
     embed.set_footer(
