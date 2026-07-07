@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord.ext import tasks
 from discord import app_commands
 import os
 import json
@@ -680,26 +681,221 @@ class SetupDashboardView(discord.ui.View):
         self.add_item(SetupDashboardSelect())
 
 
-# --- Système de participation pour les Giveaways ---
-class GiveawayView(discord.ui.View):
-    def __init__(self, prize, winners_count):
-        super().__init__(timeout=None)
-        self.prize = prize
-        self.winners_count = winners_count
-        self.participants = set()
+# ==================== SYSTÈME DE GIVEAWAYS ====================
+# Un giveaway est défini par : un prix, une durée (en jours), un nombre de
+# gagnants, et une condition de participation basée sur le système de suivi
+# des invitations déjà présent dans le bot (invite_counts). Les membres
+# rejoignent via un bouton persistant ; le tirage au sort est automatique
+# une fois la durée écoulée (vérifié périodiquement par une tâche de fond).
 
-    @discord.ui.button(label="Rejoindre ! 🎉", style=discord.ButtonStyle.success, custom_id="giveaway_join")
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id in self.participants:
-            self.participants.remove(interaction.user.id)
-            await interaction.response.send_message("❌ Vous avez retiré votre participation.", ephemeral=True)
+def get_giveaways(guild_id: str) -> list:
+    config = load_config()
+    return config.get(guild_id, {}).get("giveaways", [])
+
+
+def get_giveaway(guild_id: str, giveaway_id: int):
+    for gw in get_giveaways(guild_id):
+        if gw.get("id") == giveaway_id:
+            return gw
+    return None
+
+
+def get_next_giveaway_id(guild_id: str) -> int:
+    giveaways = get_giveaways(guild_id)
+    return max((g.get("id", 0) for g in giveaways), default=0) + 1
+
+
+def build_giveaway_embed(prize, winners_count, required_invites, end_timestamp, host,
+                          participants_count=0, color=None, ended=False, winners_mentions=None):
+    embed = discord.Embed(
+        title="🎉 GIVEAWAY 🎉" if not ended else "🎉 GIVEAWAY TERMINÉ 🎉",
+        description=(
+            f"**Prix :** {prize}\n\n"
+            + ("Cliquez sur le bouton **Participer 🎉** ci-dessous pour tenter votre chance !\n\n"
+               if not ended else "Ce giveaway est maintenant terminé.\n\n")
+            + f"⏳ **Fin :** <t:{int(end_timestamp)}:R> (<t:{int(end_timestamp)}:F>)"
+        ),
+        color=color or discord.Color.gold()
+    )
+    embed.add_field(name="🏆 Nombre de gagnants", value=str(winners_count), inline=True)
+    condition_text = f"{required_invites} invitation(s) minimum" if required_invites > 0 else "Aucune condition"
+    embed.add_field(name="📋 Condition", value=condition_text, inline=True)
+    embed.add_field(name="👥 Participants", value=str(participants_count), inline=True)
+    if ended:
+        embed.add_field(
+            name="🏆 Gagnant(s)",
+            value=winners_mentions if winners_mentions else "Aucun participant éligible.",
+            inline=False
+        )
+    embed.set_footer(
+        text=f"Giveaway organisé par {host.display_name}",
+        icon_url=host.display_avatar.url if host.display_avatar else None
+    )
+    return embed
+
+
+class GiveawayJoinButton(discord.ui.Button):
+    def __init__(self, guild_id: int, giveaway_id: int):
+        super().__init__(
+            label="Participer 🎉",
+            style=discord.ButtonStyle.success,
+            custom_id=f"giveaway_join_{guild_id}_{giveaway_id}"
+        )
+        self.guild_id = guild_id
+        self.giveaway_id = giveaway_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id = str(self.guild_id)
+        config = load_config()
+        gw = get_giveaway(guild_id, self.giveaway_id)
+
+        if not gw:
+            await interaction.response.send_message("❌ Ce giveaway n'existe plus.", ephemeral=True)
+            return
+
+        if gw.get("ended"):
+            await interaction.response.send_message("❌ Ce giveaway est déjà terminé.", ephemeral=True)
+            return
+
+        required = gw.get("required_invites", 0)
+        if required > 0:
+            invite_data = get_invite_data(config, guild_id)
+            user_invites = invite_data["invite_counts"].get(str(interaction.user.id), 0)
+            if user_invites < required:
+                await interaction.response.send_message(
+                    f"❌ Vous devez avoir invité au moins **{required}** membre(s) pour participer à ce giveaway.\n"
+                    f"Vous avez actuellement **{user_invites}** invitation(s) validée(s).",
+                    ephemeral=True
+                )
+                return
+
+        participants = gw.get("participants", [])
+        user_id = interaction.user.id
+
+        if user_id in participants:
+            participants.remove(user_id)
+            action_text = "❌ Vous avez retiré votre participation à ce giveaway."
         else:
-            self.participants.add(interaction.user.id)
-            await interaction.response.send_message("🎉 Votre participation a été enregistrée !", ephemeral=True)
-        
-        embed = interaction.message.embeds[0]
-        embed.set_footer(text=f"Participants : {len(self.participants)}")
-        await interaction.message.edit(embed=embed)
+            participants.append(user_id)
+            action_text = "🎉 Votre participation a été enregistrée !"
+
+        gw["participants"] = participants
+        giveaways = config.get(guild_id, {}).get("giveaways", [])
+        giveaways = [gw if g.get("id") == self.giveaway_id else g for g in giveaways]
+        if guild_id not in config:
+            config[guild_id] = {}
+        config[guild_id]["giveaways"] = giveaways
+        save_config(config)
+
+        await interaction.response.send_message(action_text, ephemeral=True)
+
+        # Mise à jour du nombre de participants affiché dans l'embed public
+        try:
+            embed = interaction.message.embeds[0]
+            for i, field in enumerate(embed.fields):
+                if field.name == "👥 Participants":
+                    embed.set_field_at(i, name="👥 Participants", value=str(len(participants)), inline=True)
+                    break
+            await interaction.message.edit(embed=embed)
+        except (IndexError, discord.HTTPException):
+            pass
+
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, guild_id: int, giveaway_id: int):
+        super().__init__(timeout=None)
+        self.add_item(GiveawayJoinButton(guild_id, giveaway_id))
+
+
+async def end_giveaway(guild_id: int, giveaway_id: int):
+    """Tire au sort le(s) gagnant(s) d'un giveaway terminé, met à jour le message
+    public et annonce le(s) gagnant(s) dans le salon. La condition d'invitations
+    est revérifiée au moment du tirage, au cas où un participant aurait perdu
+    des invitations entre-temps."""
+    guild_key = str(guild_id)
+    config = load_config()
+    giveaways = config.get(guild_key, {}).get("giveaways", [])
+    gw = next((g for g in giveaways if g.get("id") == giveaway_id), None)
+    if not gw or gw.get("ended"):
+        return
+
+    invite_data = get_invite_data(config, guild_key)
+    required = gw.get("required_invites", 0)
+
+    eligible = []
+    for user_id in gw.get("participants", []):
+        if required > 0 and invite_data["invite_counts"].get(str(user_id), 0) < required:
+            continue
+        eligible.append(user_id)
+
+    winners_count = gw.get("winners_count", 1)
+    winners = random.sample(eligible, min(winners_count, len(eligible))) if eligible else []
+
+    gw["ended"] = True
+    gw["winners"] = winners
+    giveaways = [gw if g.get("id") == giveaway_id else g for g in giveaways]
+    config[guild_key]["giveaways"] = giveaways
+    save_config(config)
+
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+
+    channel = guild.get_channel(gw.get("channel_id"))
+    winners_mentions = " ".join(f"<@{uid}>" for uid in winners) if winners else None
+    host = guild.get_member(gw.get("host_id")) or guild.me
+
+    embed = build_giveaway_embed(
+        prize=gw["prize"],
+        winners_count=gw["winners_count"],
+        required_invites=required,
+        end_timestamp=gw["end_timestamp"],
+        host=host,
+        participants_count=len(gw.get("participants", [])),
+        color=COLOR_MAP.get(gw.get("color", "or"), discord.Color.gold()),
+        ended=True,
+        winners_mentions=winners_mentions
+    )
+
+    if channel:
+        try:
+            message = await channel.fetch_message(gw["message_id"])
+            disabled_view = discord.ui.View()
+            disabled_view.add_item(
+                discord.ui.Button(label="Giveaway terminé", style=discord.ButtonStyle.secondary, disabled=True)
+            )
+            await message.edit(embed=embed, view=disabled_view)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+        try:
+            if winners:
+                await channel.send(f"🎉 Félicitations {winners_mentions} ! Vous avez remporté **{gw['prize']}** !")
+            else:
+                await channel.send(
+                    f"😢 Aucun participant éligible n'a été trouvé pour le giveaway **{gw['prize']}**. "
+                    "Aucun gagnant n'a été tiré au sort."
+                )
+        except discord.HTTPException:
+            pass
+
+
+@tasks.loop(seconds=30)
+async def giveaway_checker():
+    config = load_config()
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    for guild_id, guild_config in config.items():
+        for gw in guild_config.get("giveaways", []):
+            if not gw.get("ended") and gw.get("end_timestamp", 0) <= now:
+                try:
+                    await end_giveaway(int(guild_id), gw["id"])
+                except Exception as e:
+                    print(f"⚠️ Giveaway : erreur lors de la fin du giveaway {gw.get('id')} sur {guild_id} : {e}")
+
+
+@giveaway_checker.before_loop
+async def before_giveaway_checker():
+    await bot.wait_until_ready()
 
 
 # --- Classe principale du Bot ---
@@ -727,6 +923,12 @@ class RulesBot(commands.Bot):
         for guild_id, guild_config in config.items():
             for entry in guild_config.get("selfroles", []):
                 self.add_view(SelfRoleView(entry["role_id"], entry["label"], entry.get("emoji")))
+
+        # Ré-enregistrement des giveaways encore actifs (non terminés)
+        for guild_id, guild_config in config.items():
+            for gw in guild_config.get("giveaways", []):
+                if not gw.get("ended"):
+                    self.add_view(GiveawayView(int(guild_id), gw["id"]))
 
         # Système de tickets : vue générique de fermeture + panels déjà publiés
 
@@ -777,6 +979,10 @@ async def on_ready():
         except discord.Forbidden:
             bot.invite_cache[guild.id] = {}
             print(f"⚠️ Invite tracker : permissions insuffisantes pour lire les invitations sur {guild.name}.")
+
+    # Démarrage de la tâche de fond qui termine automatiquement les giveaways expirés
+    if not giveaway_checker.is_running():
+        giveaway_checker.start()
 
     print("Prêt et synchronisé !")
 
@@ -1016,7 +1222,7 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=SetupDashboardView(), ephemeral=True)
 
 
-# --- Commandes de Contenu (Sondage / Annonce / Embed) ---
+# --- Commandes de Contenu (Sondage / Annonce / Embed / Giveaway) ---
 @bot.tree.command(name="poll", description="Créer un sondage avec plusieurs options.")
 @app_commands.describe(
     question="La question du sondage",
@@ -1058,6 +1264,72 @@ async def poll(
     poll_msg = await interaction.channel.send(embed=embed)
     for i in range(len(options)):
         await poll_msg.add_reaction(emojis[i])
+
+
+@bot.tree.command(name="giveaway", description="Créer un giveaway avec une durée, un nombre de gagnants et une condition de participation.")
+@app_commands.describe(
+    prix="Le prix à gagner",
+    duree_jours="Durée du giveaway en jours (ex: 1, 0.5 pour 12h, 7 pour une semaine)",
+    gagnants="Nombre de gagnants à tirer au sort",
+    invites_requises="Nombre d'invitations minimum requis pour participer (0 = aucune condition)",
+    couleur="Couleur de l'embed"
+)
+@app_commands.choices(couleur=COLOR_CHOICES)
+@app_commands.default_permissions(manage_guild=True)
+async def giveaway(
+    interaction: discord.Interaction,
+    prix: str,
+    duree_jours: float,
+    gagnants: app_commands.Range[int, 1, 50] = 1,
+    invites_requises: app_commands.Range[int, 0, 1000] = 0,
+    couleur: str = "or"
+):
+    if duree_jours <= 0:
+        await interaction.response.send_message("❌ La durée doit être supérieure à 0 jour.", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild.id)
+    giveaway_id = get_next_giveaway_id(guild_id)
+
+    end_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=duree_jours)
+    end_timestamp = end_dt.timestamp()
+
+    embed_color = COLOR_MAP.get(couleur, discord.Color.gold())
+
+    embed = build_giveaway_embed(
+        prize=prix,
+        winners_count=gagnants,
+        required_invites=invites_requises,
+        end_timestamp=end_timestamp,
+        host=interaction.user,
+        participants_count=0,
+        color=embed_color
+    )
+
+    view = GiveawayView(interaction.guild.id, giveaway_id)
+
+    await interaction.response.send_message("✅ Le giveaway a été lancé avec succès !", ephemeral=True)
+    gw_message = await interaction.channel.send(embed=embed, view=view)
+
+    config = load_config()
+    if guild_id not in config:
+        config[guild_id] = {}
+    giveaways = config[guild_id].get("giveaways", [])
+    giveaways.append({
+        "id": giveaway_id,
+        "prize": prix,
+        "winners_count": gagnants,
+        "required_invites": invites_requises,
+        "channel_id": interaction.channel.id,
+        "message_id": gw_message.id,
+        "end_timestamp": end_timestamp,
+        "participants": [],
+        "ended": False,
+        "host_id": interaction.user.id,
+        "color": couleur
+    })
+    config[guild_id]["giveaways"] = giveaways
+    save_config(config)
 
 
 @bot.tree.command(name="announce", description="Créer une annonce sous forme d'embed, avec ou sans mention.")
