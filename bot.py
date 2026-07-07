@@ -2088,7 +2088,7 @@ class GlobalClearConfirmView(discord.ui.View):
 
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@bot.tree.command(name="globalclear", description="⚠️ Réinitialise à 100% TOUS les salons textuels du serveur (efface tout l'historique, y compris les anciens messages).")
+@bot.tree.command(name="globalclear", description="⚠️ Réinitialise à 100% tous les salons textuels du serveur (efface tout l'historique).")
 @app_commands.default_permissions(administrator=True)
 async def globalclear(interaction: discord.Interaction):
     text_channels = interaction.guild.text_channels
