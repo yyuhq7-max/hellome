@@ -2424,8 +2424,13 @@ class TicketNameModal(discord.ui.Modal):
         super().__init__(title="Nom des salons de ticket")
         self.setup_view = setup_view
 
+        # NOTE : le label d'un TextInput dans une modale Discord est limité à
+        # 45 caractères. L'ancien label ("Nom après le pseudo (ex: delivery,
+        # support...)") en faisait 46, ce qui provoquait un rejet silencieux
+        # de la requête par l'API Discord (Invalid Form Body) et donc
+        # l'erreur "Échec de l'interaction" côté utilisateur.
         self.nom = discord.ui.TextInput(
-            label="Nom après le pseudo (ex: delivery, support...)",
+            label="Nom après le pseudo (ex: delivery)",
             placeholder="delivery",
             default=setup_view.data.get("ticket_name_suffix", "delivery"),
             required=True,
