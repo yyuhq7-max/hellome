@@ -2418,6 +2418,29 @@ class TicketSupportRoleSelect(discord.ui.RoleSelect):
         await interaction.response.edit_message(embed=self.setup_view.build_preview_embed(), view=self.setup_view)
 
 
+# --- Modale de personnalisation du nom des salons de ticket ---
+class TicketNameModal(discord.ui.Modal):
+    def __init__(self, setup_view: "TicketSetupView"):
+        super().__init__(title="Nom des salons de ticket")
+        self.setup_view = setup_view
+
+        self.nom = discord.ui.TextInput(
+            label="Nom après le pseudo (ex: delivery, support...)",
+            placeholder="delivery",
+            default=setup_view.data.get("ticket_name_suffix", "delivery"),
+            required=True,
+            max_length=50
+        )
+        self.add_item(self.nom)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.setup_view.data["ticket_name_suffix"] = self.nom.value.strip() or "delivery"
+        await interaction.response.edit_message(
+            embed=self.setup_view.build_preview_embed(),
+            view=self.setup_view
+        )
+
+
 # --- Vue principale de configuration (/setupticket) ---
 class TicketSetupView(discord.ui.View):
     def __init__(self, guild_id: int, panel_data: dict = None, panel_id: int = None):
@@ -2429,6 +2452,7 @@ class TicketSetupView(discord.ui.View):
         if panel_data:
             self.data = json.loads(json.dumps(panel_data))  # copie profonde simple
             self.data.setdefault("support_role_ids", [])
+            self.data.setdefault("ticket_name_suffix", "delivery")
         else:
             self.data = {
                 "embed_title": "🎫 Support",
@@ -2440,7 +2464,8 @@ class TicketSetupView(discord.ui.View):
                 "category_id": None,
                 "support_role_ids": [],
                 "questions_enabled": False,
-                "questions": []
+                "questions": [],
+                "ticket_name_suffix": "delivery"
             }
 
         self.add_item(TicketPanelChannelSelect(self))
@@ -2462,11 +2487,13 @@ class TicketSetupView(discord.ui.View):
         else:
             support_line = "**Rôles support :** Aucun (staff par défaut)"
 
+        ticket_suffix = self.data.get("ticket_name_suffix", "delivery")
         status_lines = [
             f"**Salon du panel :** <#{self.data['panel_channel_id']}>" if self.data["panel_channel_id"] else "**Salon du panel :** ❌ non défini",
             f"**Catégorie tickets :** <#{self.data['category_id']}>" if self.data["category_id"] else "**Catégorie tickets :** ❌ non définie",
             support_line,
-            f"**Questions préalables :** {'✅ Activées (' + str(len(self.data['questions'])) + ')' if (self.data['questions_enabled'] and self.data['questions']) else '❌ Désactivées'}"
+            f"**Questions préalables :** {'✅ Activées (' + str(len(self.data['questions'])) + ')' if (self.data['questions_enabled'] and self.data['questions']) else '❌ Désactivées'}",
+            f"**Nom des salons de ticket :** `{{pseudo}}-{ticket_suffix}`"
         ]
         embed.add_field(name="⚙️ Configuration actuelle", value="\n".join(status_lines), inline=False)
         if self.editing_panel_id is not None:
@@ -2486,6 +2513,10 @@ class TicketSetupView(discord.ui.View):
     @discord.ui.button(label="✏️ Personnaliser l'embed", style=discord.ButtonStyle.primary, row=3, custom_id="ticket_setup_edit_embed")
     async def edit_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TicketEmbedModal(self))
+
+    @discord.ui.button(label="🏷️ Nom du ticket", style=discord.ButtonStyle.secondary, row=3, custom_id="ticket_setup_edit_name")
+    async def edit_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketNameModal(self))
 
     @discord.ui.button(label="❓ Questions : Désactivées", style=discord.ButtonStyle.secondary, row=3, custom_id="ticket_setup_toggle_questions")
     async def toggle_questions(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3161,8 +3192,11 @@ async def create_ticket_channel(interaction: discord.Interaction, guild_id: int,
     category = guild.get_channel(cfg["category_id"])
     ticket_number = get_next_ticket_number(str(guild_id))
 
-    # Nom du salon basé sur le pseudo de l'utilisateur : "{user}-delivery"
-    base_name = f"{slugify_username(interaction.user.name)}-delivery"
+    # Nom du salon basé sur le pseudo de l'utilisateur : "{user}-{nom_choisi}"
+    # Le suffixe est configurable via /setupticket (bouton "🏷️ Nom du ticket"),
+    # avec "delivery" comme valeur par défaut pour rester rétro-compatible.
+    ticket_suffix = slugify_username(cfg.get("ticket_name_suffix", "delivery"))
+    base_name = f"{slugify_username(interaction.user.name)}-{ticket_suffix}"
     existing_names = {c.name for c in guild.text_channels}
     channel_name = base_name
     suffix = 2
