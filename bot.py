@@ -1121,6 +1121,31 @@ class RulesBot(commands.Bot):
 bot = RulesBot()
 
 
+# --- Système anti-veille pour Render (Free/Web Service) ---
+# Render met en veille les Web Services gratuits après ~15 minutes sans requête
+# HTTP entrante. On contourne ça en s'auto-pingant régulièrement sur notre
+# propre URL publique (RENDER_EXTERNAL_URL est fournie automatiquement par
+# Render pour tout Web Service, pas besoin de la définir manuellement).
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+
+
+@tasks.loop(minutes=10)
+async def self_ping():
+    if not RENDER_EXTERNAL_URL:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(RENDER_EXTERNAL_URL, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                print(f"🔁 Self-ping effectué avec succès (statut {resp.status})")
+    except Exception as e:
+        print(f"⚠️ Self-ping échoué : {e}")
+
+
+@self_ping.before_loop
+async def before_self_ping():
+    await bot.wait_until_ready()
+
+
 # --- Événements du Bot ---
 @bot.event
 async def on_ready():
@@ -1138,6 +1163,10 @@ async def on_ready():
     # Démarrage de la tâche de fond qui termine automatiquement les giveaways expirés
     if not giveaway_checker.is_running():
         giveaway_checker.start()
+
+    # Démarrage de la tâche de fond qui garde le bot actif 24/24 sur Render
+    if not self_ping.is_running():
+        self_ping.start()
 
     print("Prêt et synchronisé !")
 
